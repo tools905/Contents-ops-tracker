@@ -1,9 +1,9 @@
 export const PIPELINE = ['Idea', 'Script', 'Shoot', 'Production', 'Upload', 'Post-Upload Metrics'] as const;
 export type Stage = (typeof PIPELINE)[number];
-export type AppRole = 'Admin' | 'Content Producer' | 'Content Approver' | 'Monitoring' | 'Read-only Stakeholder';
+export type AppRole = 'Owner' | 'Admin' | 'Content Producer' | 'Content Approver' | 'Monitoring' | 'Read-only Stakeholder';
 export type StageStatus = 'In progress' | 'Pending approval' | 'Changes requested' | 'Approved';
 
-export type Person = { id: string; name: string; email: string; initials: string; roles: AppRole[] };
+export type Person = { id: string; name: string; email: string; initials: string; roles: AppRole[]; isActive?: boolean };
 export type ItemLink = { label: string; kind: string; url: string };
 export type HistoryEvent = { action: string; actor: string; at: string; note?: string; flagged?: boolean };
 export type Comment = { id: string; author: string; initials: string; body: string; at: string; parentId?: string };

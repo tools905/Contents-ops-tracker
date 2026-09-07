@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useState, type FormEvent } from 'react';
 import type { SupabaseClient, User } from '@supabase/supabase-js';
-import { AlertTriangle, BarChart3, Bell, Check, CheckCircle2, ChevronRight, CircleGauge, ExternalLink, FileCheck2, FileText, LayoutDashboard, Link2, LogOut, MessageSquareText, Plus, RefreshCw, Settings2, ShieldCheck, UploadCloud, UserRound, Users2, X } from 'lucide-react';
+import { AlertTriangle, ArrowRight, BarChart3, Bell, Check, CheckCircle2, ChevronRight, CircleGauge, Clock3, ExternalLink, FileCheck2, FileText, GripVertical, LayoutDashboard, Link2, LogOut, MessageSquareText, Plus, RefreshCw, Settings2, ShieldCheck, UploadCloud, UserRound, Users2, X } from 'lucide-react';
 
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { Badge } from '@/components/ui/badge';
@@ -24,17 +24,17 @@ import { PIPELINE, type AppRole, type ContentItem, type Person, type Stage } fro
 import { makeSupabaseClient, type SupabaseConfig } from '@/lib/supabase-client';
 import { loadLiveSnapshot } from '@/lib/supabase-data';
 
-type View = 'overview' | 'pipeline' | 'approvals' | 'monitoring' | 'stakeholder' | 'people' | 'settings';
-const ROLE_PERSON: Record<AppRole, string> = { Admin: 'p1', 'Content Producer': 'p2', 'Content Approver': 'p6', Monitoring: 'p7', 'Read-only Stakeholder': 'p8' };
+type View = 'overview' | 'pipeline' | 'actions' | 'people' | 'settings';
+type MoveIntent = { item: ContentItem; toStage: Stage };
+const ROLE_PERSON: Record<AppRole, string> = { Owner: 'p1', Admin: 'p10', 'Content Producer': 'p2', 'Content Approver': 'p6', Monitoring: 'p7', 'Read-only Stakeholder': 'p8' };
 const stageToDb: Record<Stage, string> = { Idea: 'idea', Script: 'script', Shoot: 'shoot', Production: 'production', Upload: 'upload', 'Post-Upload Metrics': 'post_upload_metrics' };
+const roleToDb: Record<Exclude<AppRole, 'Owner'>, string> = { Admin: 'admin', 'Content Producer': 'content_producer', 'Content Approver': 'content_approver', Monitoring: 'monitoring', 'Read-only Stakeholder': 'read_only_stakeholder' };
 
 const nav: Array<{ view: View; label: string; icon: typeof LayoutDashboard }> = [
   { view: 'overview', label: 'Overview', icon: LayoutDashboard },
-  { view: 'pipeline', label: 'Content pipeline', icon: FileText },
-  { view: 'approvals', label: 'Approval queue', icon: FileCheck2 },
-  { view: 'monitoring', label: 'Monitoring', icon: BarChart3 },
-  { view: 'stakeholder', label: 'Stakeholder view', icon: CircleGauge },
-  { view: 'people', label: 'People & roles', icon: Users2 },
+  { view: 'pipeline', label: 'Kanban', icon: FileText },
+  { view: 'actions', label: 'My Actions', icon: FileCheck2 },
+  { view: 'people', label: 'People & access', icon: Users2 },
   { view: 'settings', label: 'Settings', icon: Settings2 },
 ];
 
@@ -47,11 +47,12 @@ export default function ContentOpsApp({ supabaseConfig }: { supabaseConfig?: Sup
   const [people, setPeople] = useState<Person[]>(demoPeople);
   const [items, setItems] = useState<ContentItem[]>(demoItems);
   const [currentUser, setCurrentUser] = useState<Person>(demoPeople[0]);
-  const [currentRole, setCurrentRole] = useState<AppRole>('Admin');
+  const [currentRole, setCurrentRole] = useState<AppRole>('Owner');
   const [view, setView] = useState<View>('overview');
   const [selectedId, setSelectedId] = useState<string>();
   const [createOpen, setCreateOpen] = useState(false);
   const [overrideItem, setOverrideItem] = useState<ContentItem>();
+  const [moveIntent, setMoveIntent] = useState<MoveIntent>();
   const [notice, setNotice] = useState('');
   const [busy, setBusy] = useState(false);
 
@@ -78,8 +79,13 @@ export default function ContentOpsApp({ supabaseConfig }: { supabaseConfig?: Sup
   }, [client, reloadLive]);
 
   const rolePerson = demoMode ? people.find((person) => person.id === ROLE_PERSON[currentRole]) ?? currentUser : currentUser;
+  const effectiveRoles = useMemo(() => demoMode ? [currentRole] : currentUser.roles, [demoMode, currentRole, currentUser.roles]);
   const selected = items.find((item) => item.id === selectedId);
-  const visibleItems = useMemo(() => filterForRole(items, currentRole, rolePerson), [items, currentRole, rolePerson]);
+  const visibleItems = useMemo(() => filterForRoles(items, effectiveRoles, rolePerson), [items, effectiveRoles, rolePerson]);
+  const myActions = useMemo(() => getMyActions(visibleItems, effectiveRoles, rolePerson), [visibleItems, effectiveRoles, rolePerson]);
+  const canManageAccess = effectiveRoles.includes('Owner');
+  const canCreate = hasAnyRole(effectiveRoles, ['Owner', 'Admin', 'Content Producer']);
+  const visibleNav = nav.filter((entry) => entry.view !== 'people' || canManageAccess).filter((entry) => entry.view !== 'settings' || hasAnyRole(effectiveRoles, ['Owner', 'Admin']));
   const showNotice = (message: string) => { setNotice(message); window.setTimeout(() => setNotice(''), 4000); };
 
   const mutateLive = async (work: (supabase: SupabaseClient) => Promise<unknown>, success: string) => {
@@ -110,6 +116,34 @@ export default function ContentOpsApp({ supabaseConfig }: { supabaseConfig?: Sup
 
   const approve = (item: ContentItem) => {
     if (['Script', 'Production'].includes(item.stage) && item.secondLens !== 'Approved') setOverrideItem(item); else void advance(item);
+  };
+
+  const requestMove = (item: ContentItem, toStage: Stage) => {
+    const next = PIPELINE[PIPELINE.indexOf(item.stage) + 1];
+    if (next !== toStage) return showNotice('Cards move one stage at a time so every handoff stays accountable.');
+    if (item.status === 'Pending approval' && !canApproveItem(item, effectiveRoles, rolePerson)) return showNotice('An accountable owner must approve this handoff.');
+    if (item.status !== 'Pending approval' && !canSubmitItem(item, effectiveRoles, rolePerson)) return showNotice('You are not assigned to submit this stage.');
+    setMoveIntent({ item, toStage });
+  };
+
+  const confirmMove = () => {
+    if (!moveIntent) return;
+    const item = moveIntent.item;
+    setMoveIntent(undefined);
+    if (item.status === 'Pending approval') approve(item);
+    else void submitStage(item);
+  };
+
+  const manageAccess = async (person: Person, isActive: boolean, roles: AppRole[]) => {
+    const assignable = roles.filter((role): role is Exclude<AppRole, 'Owner'> => role !== 'Owner');
+    if (demoMode) {
+      setPeople((all) => all.map((entry) => entry.id === person.id ? { ...entry, isActive, roles: entry.roles.includes('Owner') ? ['Owner'] : assignable } : entry));
+      return showNotice(`${person.name}'s access was updated in the demo.`);
+    }
+    return mutateLive(async (supabase) => {
+      const { error } = await supabase.rpc('manage_user_access', { p_profile_id: person.id, p_is_active: isActive, p_roles: assignable.map((role) => roleToDb[role]) });
+      if (error) throw error;
+    }, `${person.name}'s access was updated.`);
   };
 
   const requestChanges = async (item: ContentItem, note: string) => {
@@ -158,13 +192,13 @@ export default function ContentOpsApp({ supabaseConfig }: { supabaseConfig?: Sup
       if (!input || typeof input !== 'object' || Array.isArray(input) || Object.keys(input).length !== 0) throw new Error('Expected an empty object');
     };
     const tools = [
-      { name: 'list_actionable_content', title: 'List actionable content', description: 'List active content items that are overdue or awaiting approval in the visible workspace.', inputSchema: { type: 'object', properties: {}, additionalProperties: false }, annotations: { readOnlyHint: true, untrustedContentHint: true }, execute: async (input: unknown) => { requireEmptyObject(input); return visibleItems.filter((item) => item.status === 'Pending approval' || isOverdue(item)).map((item) => ({ id: item.id, title: item.title, stage: item.stage, status: item.status, dueAt: item.dueAt })); } },
-      { name: 'start_content_creation', title: 'Start content creation', description: 'Open the new content form without creating a record.', inputSchema: { type: 'object', properties: {}, additionalProperties: false }, annotations: { readOnlyHint: false, untrustedContentHint: false }, execute: async (input: unknown) => { requireEmptyObject(input); setCreateOpen(true); return { status: 'form_opened' }; } },
-      { name: 'submit_content_stage', title: 'Submit content stage', description: 'Submit one visible content item current stage for accountable approval.', inputSchema: { type: 'object', properties: { contentItemId: { type: 'string' } }, required: ['contentItemId'], additionalProperties: false }, annotations: { readOnlyHint: false, untrustedContentHint: false }, execute: async (input: unknown) => { if (!input || typeof input !== 'object' || Array.isArray(input) || Object.keys(input).length !== 1 || typeof (input as { contentItemId?: unknown }).contentItemId !== 'string') throw new Error('A contentItemId string is required'); const id = (input as { contentItemId: string }).contentItemId; const item = visibleItems.find((row) => row.id === id); if (!item) throw new Error('Visible content item not found'); await submitStage(item); return { id: item.id, status: 'pending_approval' }; } },
+      { name: 'list_my_actions', title: 'List my actions', description: 'List the current login’s approval, review, metrics and assigned-work actions.', inputSchema: { type: 'object', properties: {}, additionalProperties: false }, annotations: { readOnlyHint: true, untrustedContentHint: true }, execute: async (input: unknown) => { requireEmptyObject(input); return myActions.map(({ item, kind, label }) => ({ id: item.id, title: item.title, kind, label, stage: item.stage, dueAt: item.dueAt })); } },
+      { name: 'start_content_creation', title: 'Start content creation', description: 'Open the new content form without creating a record.', inputSchema: { type: 'object', properties: {}, additionalProperties: false }, annotations: { readOnlyHint: false, untrustedContentHint: false }, execute: async (input: unknown) => { requireEmptyObject(input); if (!canCreate) throw new Error('This login cannot create content'); setCreateOpen(true); return { status: 'form_opened' }; } },
+      { name: 'submit_content_stage', title: 'Submit content stage', description: 'Submit one assigned content item stage for accountable approval.', inputSchema: { type: 'object', properties: { contentItemId: { type: 'string' } }, required: ['contentItemId'], additionalProperties: false }, annotations: { readOnlyHint: false, untrustedContentHint: false }, execute: async (input: unknown) => { if (!input || typeof input !== 'object' || Array.isArray(input) || Object.keys(input).length !== 1 || typeof (input as { contentItemId?: unknown }).contentItemId !== 'string') throw new Error('A contentItemId string is required'); const id = (input as { contentItemId: string }).contentItemId; const item = visibleItems.find((row) => row.id === id); if (!item) throw new Error('Visible content item not found'); if (!canSubmitItem(item, effectiveRoles, rolePerson)) throw new Error('This login is not assigned to submit the item'); await submitStage(item); return { id: item.id, status: 'pending_approval' }; } },
     ];
     for (const tool of tools) void Promise.resolve(context.registerTool(tool, { signal: lifecycle.signal })).catch(() => undefined);
     return () => lifecycle.abort();
-  }, [visibleItems]);
+  }, [visibleItems, myActions, canCreate, effectiveRoles, rolePerson]);
 
   if (!authReady) return <LoadingScreen />;
   if (!demoMode && !authUser) return <LoginScreen client={client!} notice={notice} setNotice={setNotice} />;
@@ -175,39 +209,58 @@ export default function ContentOpsApp({ supabaseConfig }: { supabaseConfig?: Sup
       <Sidebar className="border-r-0" collapsible="offcanvas">
         <SidebarHeader className="px-5 pb-6 pt-6"><div className="flex items-center gap-3"><div className="brand-mark">A</div><div><p className="brand-name">AAFM India</p><p className="text-xs text-white/55">Content operations</p></div></div></SidebarHeader>
         <SidebarContent><SidebarGroup><SidebarGroupLabel className="px-3 text-[11px] font-semibold uppercase tracking-[0.16em] text-white/40">Workspace</SidebarGroupLabel><SidebarGroupContent><SidebarMenu className="gap-1.5 px-2">
-          {nav.map(({ view: target, label, icon: Icon }) => <SidebarMenuItem key={target}><SidebarMenuButton isActive={view === target} onClick={() => setView(target)} className="h-10 text-[14px] text-white/70 hover:bg-white/10 hover:text-white data-active:bg-white/12 data-active:text-white"><Icon /><span>{label}</span>{target === 'approvals' && <Badge className="ml-auto bg-[#dfa126] text-[#1f2342]">{items.filter((item) => item.status === 'Pending approval').length}</Badge>}</SidebarMenuButton></SidebarMenuItem>)}
+          {visibleNav.map(({ view: target, label, icon: Icon }) => <SidebarMenuItem key={target}><SidebarMenuButton isActive={view === target} onClick={() => setView(target)} className="h-10 text-[14px] text-white/70 hover:bg-white/10 hover:text-white data-active:bg-white/12 data-active:text-white"><Icon /><span>{label}</span>{target === 'actions' && myActions.length > 0 && <Badge className="ml-auto bg-[#dfa126] text-[#1f2342]">{myActions.length}</Badge>}</SidebarMenuButton></SidebarMenuItem>)}
         </SidebarMenu></SidebarGroupContent></SidebarGroup></SidebarContent>
-        <SidebarFooter className="p-4"><div className="rounded-xl border border-white/10 bg-white/6 p-3"><div className="flex items-center gap-2.5"><Avatar person={rolePerson} /><div className="min-w-0"><p className="truncate text-sm font-medium text-white">{rolePerson.name}</p><p className="truncate text-xs text-white/45">{currentRole}{demoMode ? ' · demo' : ''}</p></div></div></div></SidebarFooter>
+        <SidebarFooter className="p-4"><div className="rounded-xl border border-white/10 bg-white/6 p-3"><div className="flex items-center gap-2.5"><Avatar person={rolePerson} /><div className="min-w-0"><p className="truncate text-sm font-medium text-white">{rolePerson.name}</p><p className="truncate text-xs text-white/45">{effectiveRoles.join(' · ')}{demoMode ? ' · demo' : ''}</p></div></div></div></SidebarFooter>
       </Sidebar>
       <SidebarInset className="min-w-0 bg-[#f4f1ea]">
         <header className="sticky top-0 z-20 flex min-h-16 items-center justify-between gap-3 border-b border-[#1f2342]/8 bg-[#f4f1ea]/92 px-4 py-2 backdrop-blur-md sm:px-7 lg:px-10">
-          <div className="flex items-center gap-3"><SidebarTrigger className="md:hidden" /><div className="hidden sm:block"><p className="text-xs font-semibold uppercase tracking-[0.14em] text-[#7a5200]">Sunday, 7 September</p><p className="text-sm text-[#525570]">Asia/Kolkata</p></div></div>
-          <div className="flex items-center gap-2">{demoMode && <NativeSelect aria-label="Preview role" value={currentRole} onChange={(event) => { const role = event.target.value as AppRole; setCurrentRole(role); setCurrentUser(people.find((person) => person.id === ROLE_PERSON[role]) ?? currentUser); }} className="max-w-[180px] bg-white"><NativeSelectOption>Admin</NativeSelectOption><NativeSelectOption>Content Producer</NativeSelectOption><NativeSelectOption>Content Approver</NativeSelectOption><NativeSelectOption>Monitoring</NativeSelectOption><NativeSelectOption>Read-only Stakeholder</NativeSelectOption></NativeSelect>}
-            <Button variant="outline" size="icon" aria-label="Notifications"><Bell /></Button>{currentRole !== 'Read-only Stakeholder' && <Button onClick={() => setCreateOpen(true)} className="bg-[#1f2342] text-white hover:bg-[#2d3159]"><Plus /> <span className="hidden sm:inline">New content</span></Button>}{!demoMode && <Button variant="ghost" size="icon" aria-label="Sign out" onClick={() => void client?.auth.signOut()}><LogOut /></Button>}</div>
+          <div className="flex items-center gap-3"><SidebarTrigger className="md:hidden" /><div className="hidden sm:block"><p className="text-xs font-semibold uppercase tracking-[0.14em] text-[#7a5200]">Content operations</p><p className="text-sm text-[#525570]">Asia/Kolkata</p></div></div>
+          <div className="flex items-center gap-2">{demoMode && <NativeSelect aria-label="Preview login role" value={currentRole} onChange={(event) => { const role = event.target.value as AppRole; setCurrentRole(role); setCurrentUser(people.find((person) => person.id === ROLE_PERSON[role]) ?? currentUser); setView('overview'); }} className="max-w-[190px] bg-white"><NativeSelectOption>Owner</NativeSelectOption><NativeSelectOption>Admin</NativeSelectOption><NativeSelectOption>Content Producer</NativeSelectOption><NativeSelectOption>Content Approver</NativeSelectOption><NativeSelectOption>Monitoring</NativeSelectOption><NativeSelectOption>Read-only Stakeholder</NativeSelectOption></NativeSelect>}
+            <Button variant="outline" size="icon" aria-label="Notifications"><Bell /></Button>{canCreate && <Button onClick={() => setCreateOpen(true)} className="bg-[#1f2342] text-white hover:bg-[#2d3159]"><Plus /> <span className="hidden sm:inline">New content</span></Button>}{!demoMode && <Button variant="ghost" size="icon" aria-label="Sign out" onClick={() => void client?.auth.signOut()}><LogOut /></Button>}</div>
         </header>
         {notice && <output className="fixed right-4 top-20 z-50 max-w-sm rounded-xl bg-[#1f2342] px-4 py-3 text-sm text-white shadow-xl">{notice}</output>}
         <main className="mx-auto w-full max-w-[1480px] px-4 py-7 sm:px-7 lg:px-10 lg:py-9">
           {view === 'overview' && <Overview items={visibleItems} onOpen={(id) => setSelectedId(id)} setView={setView} />}
-          {view === 'pipeline' && <Pipeline items={visibleItems} onOpen={(id) => setSelectedId(id)} />}
-          {view === 'approvals' && <Approvals items={visibleItems} role={currentRole} onOpen={(id) => setSelectedId(id)} onReview={secondLensReview} />}
-          {view === 'monitoring' && <Monitoring items={visibleItems} onOpen={(id) => setSelectedId(id)} onSave={addMetric} />}
-          {view === 'stakeholder' && <Stakeholder items={items} />}
-          {view === 'people' && <People people={people} demoMode={demoMode} />}
+          {view === 'pipeline' && <Pipeline items={visibleItems} roles={effectiveRoles} person={rolePerson} onOpen={(id) => setSelectedId(id)} onMove={requestMove} />}
+          {view === 'actions' && <MyActions actions={myActions} onOpen={(id) => setSelectedId(id)} onReview={secondLensReview} onSaveMetric={addMetric} />}
+          {view === 'people' && <People people={people} demoMode={demoMode} onManage={manageAccess} />}
           {view === 'settings' && <Settings demoMode={demoMode} />}
         </main>
       </SidebarInset>
       <CreateDialog open={createOpen} onOpenChange={setCreateOpen} people={people} onCreate={createItem} />
-      <ItemDetail open={Boolean(selected)} item={selected} role={currentRole} busy={busy} onOpenChange={(open) => !open && setSelectedId(undefined)} onSubmit={submitStage} onApprove={approve} onRequestChanges={requestChanges} onComment={addComment} onMetric={addMetric} />
+      <ItemDetail open={Boolean(selected)} item={selected} roles={effectiveRoles} person={rolePerson} busy={busy} onOpenChange={(open) => !open && setSelectedId(undefined)} onSubmit={submitStage} onApprove={approve} onRequestChanges={requestChanges} onComment={addComment} onMetric={addMetric} />
       <OverrideDialog item={overrideItem} onOpenChange={(open) => !open && setOverrideItem(undefined)} onConfirm={advance} />
+      <MoveDialog intent={moveIntent} onOpenChange={(open) => !open && setMoveIntent(undefined)} onConfirm={confirmMove} />
     </SidebarProvider>
   );
 }
 
-function filterForRole(items: ContentItem[], role: AppRole, person: Person) {
-  if (role === 'Admin' || role === 'Read-only Stakeholder') return items;
-  if (role === 'Content Approver') return items.filter((item) => ['Script', 'Production'].includes(item.stage));
-  if (role === 'Monitoring') return items.filter((item) => item.stage === 'Post-Upload Metrics' || item.publishedAt);
-  return items.filter((item) => [...item.responsible, ...item.accountable].some((owner) => owner.id === person.id));
+function hasAnyRole(roles: AppRole[], expected: AppRole[]) { return expected.some((role) => roles.includes(role)); }
+function isAssigned(item: ContentItem, person: Person, kind: 'responsible' | 'accountable' | 'either' = 'either') {
+  const assigned = kind === 'responsible' ? item.responsible : kind === 'accountable' ? item.accountable : [...item.responsible, ...item.accountable];
+  return assigned.some((owner) => owner.id === person.id);
+}
+function canSubmitItem(item: ContentItem, roles: AppRole[], person: Person) { return hasAnyRole(roles, ['Owner', 'Admin']) || isAssigned(item, person); }
+function canApproveItem(item: ContentItem, roles: AppRole[], person: Person) { return hasAnyRole(roles, ['Owner', 'Admin']) || isAssigned(item, person, 'accountable'); }
+function filterForRoles(items: ContentItem[], roles: AppRole[], person: Person) {
+  if (hasAnyRole(roles, ['Owner', 'Admin', 'Read-only Stakeholder'])) return items;
+  return items.filter((item) => isAssigned(item, person)
+    || (roles.includes('Content Approver') && ['Script', 'Production'].includes(item.stage))
+    || (roles.includes('Monitoring') && (item.stage === 'Post-Upload Metrics' || Boolean(item.publishedAt))));
+}
+
+type ActionItem = { item: ContentItem; kind: 'approval' | 'second-lens' | 'metrics' | 'work'; label: string; priority: number };
+function getMyActions(items: ContentItem[], roles: AppRole[], person: Person): ActionItem[] {
+  const elevated = hasAnyRole(roles, ['Owner', 'Admin']);
+  const actions: ActionItem[] = [];
+  for (const item of items.filter((row) => row.lifecycle === 'Active')) {
+    if (item.status === 'Pending approval' && (elevated || isAssigned(item, person, 'accountable'))) actions.push({ item, kind: 'approval', label: 'Approve this handoff', priority: isOverdue(item) ? 0 : 1 });
+    if (['Script', 'Production'].includes(item.stage) && item.secondLens === 'Awaiting review' && (elevated || roles.includes('Content Approver'))) actions.push({ item, kind: 'second-lens', label: 'Complete second-lens review', priority: 1 });
+    if (item.stage === 'Post-Upload Metrics' && item.metrics.length === 0 && (elevated || roles.includes('Monitoring'))) actions.push({ item, kind: 'metrics', label: 'Add performance metrics', priority: isOverdue(item) ? 0 : 2 });
+    if (item.status !== 'Pending approval' && (elevated ? isOverdue(item) : isAssigned(item, person, 'responsible'))) actions.push({ item, kind: 'work', label: item.status === 'Changes requested' ? 'Make requested changes' : 'Continue your stage work', priority: isOverdue(item) ? 0 : 3 });
+  }
+  return actions.sort((a, b) => a.priority - b.priority || (a.item.dueAt ?? '').localeCompare(b.item.dueAt ?? ''));
 }
 
 function isOverdue(item: ContentItem) { return Boolean(item.dueAt && new Date(item.dueAt).getTime() < Date.now() && item.lifecycle === 'Active'); }
@@ -227,16 +280,62 @@ function Overview({ items, onOpen, setView }: { items: ContentItem[]; onOpen: (i
   return <><PageTitle eyebrow="OPERATIONS OVERVIEW" title="Keep every story moving." description="Approvals, ownership and deadlines across the AAFM India content pipeline." />
     <section className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4"><MetricCard label="Active items" value={String(active.length)} detail="Across six stages" icon={CircleGauge} /><MetricCard label="Needs approval" value={String(approvals.length)} detail="Explicit sign-off required" icon={FileCheck2} accent /><MetricCard label="Posted today" value={String(posted.length)} detail="Across active platforms" icon={CheckCircle2} /><MetricCard label="Overdue" value={String(overdue.length)} detail={overdue.length ? 'Needs attention today' : 'Everything on track'} icon={AlertTriangle} warning /></section>
     <section className="mt-7 rounded-2xl border border-[#1f2342]/10 bg-white p-5 shadow-[0_12px_35px_rgba(31,35,66,0.05)] sm:p-6"><div className="mb-5 flex items-center justify-between"><div><h2 className="text-base font-semibold text-[#1f2342]">Pipeline pulse</h2><p className="mt-1 text-sm text-[#6b7280]">{active.length} active items by stage</p></div><Button variant="ghost" size="sm" onClick={() => setView('pipeline')}>View pipeline <ChevronRight /></Button></div><div className="grid grid-cols-2 gap-3 sm:grid-cols-3 xl:grid-cols-6">{PIPELINE.map((stage, index) => <div key={stage} className="relative overflow-hidden rounded-xl border border-[#1f2342]/8 bg-[#fbfaf6] p-4"><div className={`absolute inset-x-0 top-0 h-1 ${['bg-slate-400','bg-[#dfa126]','bg-sky-500','bg-violet-500','bg-emerald-500','bg-[#1f2342]'][index]}`} /><p className="mt-1 text-sm font-medium text-[#525570]">{stage === 'Post-Upload Metrics' ? 'Metrics' : stage}</p><div className="mt-5 flex items-end justify-between"><span className="font-display text-3xl font-semibold text-[#1f2342]">{active.filter((item) => item.stage === stage).length}</span><span className="text-xs text-[#9b9da9]">0{index + 1}</span></div></div>)}</div></section>
-    <section className="mt-5 grid gap-5 xl:grid-cols-[minmax(0,1.65fr)_minmax(290px,.7fr)]"><Card className="bg-white"><CardHeader><CardTitle>Action queue</CardTitle><CardDescription>Items requiring attention next</CardDescription></CardHeader><CardContent className="overflow-x-auto px-0 sm:px-4"><ItemTable items={[...overdue, ...approvals.filter((item) => !overdue.includes(item))].slice(0, 5)} onOpen={onOpen} /></CardContent></Card><Card className="bg-[#1f2342] text-white ring-0"><CardHeader><CardTitle>Second-lens review</CardTitle><CardDescription className="text-white/55">BuildableLabs queue</CardDescription><CardAction><MessageSquareText className="size-5 text-[#f0c254]" /></CardAction></CardHeader><CardContent className="space-y-3">{items.filter((item) => ['Script','Production'].includes(item.stage) && item.secondLens === 'Awaiting review').slice(0, 3).map((item) => <button key={item.id} onClick={() => onOpen(item.id)} className="w-full rounded-xl border border-white/10 bg-white/6 p-3 text-left transition hover:bg-white/10"><div className="flex justify-between gap-3"><p className="text-sm font-medium">{item.title}</p><ChevronRight className="size-4 text-white/40" /></div><p className="mt-2 text-xs text-white/50">{item.stage} · Awaiting review</p></button>)}</CardContent></Card></section></>;
+    <section className="mt-5 grid gap-5 xl:grid-cols-[minmax(0,1.65fr)_minmax(290px,.7fr)]"><Card className="bg-white"><CardHeader><CardTitle>Urgent work</CardTitle><CardDescription>Overdue items and handoffs waiting for sign-off</CardDescription><CardAction><Button variant="ghost" size="sm" onClick={() => setView('actions')}>My Actions <ChevronRight /></Button></CardAction></CardHeader><CardContent className="overflow-x-auto px-0 sm:px-4"><ItemTable items={[...overdue, ...approvals.filter((item) => !overdue.includes(item))].slice(0, 5)} onOpen={onOpen} /></CardContent></Card><Card className="bg-[#1f2342] text-white ring-0"><CardHeader><CardTitle>Second-lens review</CardTitle><CardDescription className="text-white/55">BuildableLabs queue</CardDescription><CardAction><MessageSquareText className="size-5 text-[#f0c254]" /></CardAction></CardHeader><CardContent className="space-y-3">{items.filter((item) => ['Script','Production'].includes(item.stage) && item.secondLens === 'Awaiting review').slice(0, 3).map((item) => <button key={item.id} onClick={() => onOpen(item.id)} className="w-full rounded-xl border border-white/10 bg-white/6 p-3 text-left transition hover:bg-white/10"><div className="flex justify-between gap-3"><p className="text-sm font-medium">{item.title}</p><ChevronRight className="size-4 text-white/40" /></div><p className="mt-2 text-xs text-white/50">{item.stage} · Awaiting review</p></button>)}</CardContent></Card></section></>;
 }
 
 function ItemTable({ items, onOpen }: { items: ContentItem[]; onOpen: (id: string) => void }) { return <Table><TableHeader><TableRow><TableHead>Content</TableHead><TableHead>Stage</TableHead><TableHead>Accountable</TableHead><TableHead>Due</TableHead></TableRow></TableHeader><TableBody>{items.map((item) => <TableRow key={item.id} className="cursor-pointer" onClick={() => onOpen(item.id)}><TableCell className="min-w-[250px]"><p className="font-medium text-[#1f2342]">{item.title}</p><p className="mt-1 text-xs text-[#7b7f90]">{item.contentType}</p></TableCell><TableCell><div className="space-y-2"><StatusBadge item={item} /><p className="text-xs text-[#7b7f90]">{item.stage}</p></div></TableCell><TableCell><Owners people={item.accountable} /></TableCell><TableCell className={isOverdue(item) ? 'font-medium text-[#b34726]' : 'text-[#525570]'}>{dueLabel(item)}</TableCell></TableRow>)}</TableBody></Table>;
 }
 
-function Pipeline({ items, onOpen }: { items: ContentItem[]; onOpen: (id: string) => void }) { return <><PageTitle eyebrow="CONTENT PIPELINE" title="Six stages. One clear handoff." description="Every move is deliberate, assigned and recorded." /><div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-6">{PIPELINE.map((stage, index) => { const rows = items.filter((item) => item.stage === stage && item.lifecycle === 'Active'); return <section key={stage} className="min-w-0 rounded-2xl border border-[#1f2342]/10 bg-white/70 p-3"><div className="mb-3 flex items-center justify-between px-1"><div><p className="text-xs font-semibold text-[#9b6908]">0{index + 1}</p><h2 className="text-sm font-semibold text-[#1f2342]">{stage}</h2></div><Badge variant="secondary">{rows.length}</Badge></div><div className="space-y-3">{rows.map((item) => <button key={item.id} onClick={() => onOpen(item.id)} className="w-full rounded-xl border border-[#1f2342]/8 bg-white p-3 text-left shadow-sm transition hover:-translate-y-0.5 hover:shadow-md"><p className="text-sm font-medium leading-snug text-[#1f2342]">{item.title}</p><p className="mt-1 text-xs text-[#7b7f90]">{item.contentType}</p><div className="mt-4 flex items-center justify-between"><Owners people={item.accountable} /><span className={`text-[11px] ${isOverdue(item) ? 'font-semibold text-[#b34726]' : 'text-[#7b7f90]'}`}>{dueLabel(item)}</span></div><Progress value={stagePercent(item.stage)} className="mt-3" /></button>)}{!rows.length && <div className="rounded-xl border border-dashed border-[#1f2342]/15 px-3 py-8 text-center text-xs text-[#8b8e9e]">No items here</div>}</div></section>; })}</div></>;
+function Pipeline({ items, roles, person, onOpen, onMove }: { items: ContentItem[]; roles: AppRole[]; person: Person; onOpen: (id: string) => void; onMove: (item: ContentItem, stage: Stage) => void }) {
+  const stageStyles = [
+    'border-t-[#77809b] bg-[#eef0f5]',
+    'border-t-[#dfa126] bg-[#fbf2dc]',
+    'border-t-[#4e91ad] bg-[#e9f3f6]',
+    'border-t-[#8b70ab] bg-[#f1edf6]',
+    'border-t-[#3b9171] bg-[#e9f4ef]',
+    'border-t-[#1f2342] bg-[#e9eaf0]',
+  ];
+  return <>
+    <div className="mb-6 flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
+      <PageTitle eyebrow="CONTENT KANBAN" title="Move work forward, one handoff at a time." description="Drag a card toward its next stage, or open it to review the work and submit it." />
+      <div className="mb-7 flex shrink-0 items-center gap-2 rounded-xl border border-[#1f2342]/10 bg-white px-3 py-2 text-sm text-[#525570]"><GripVertical className="size-4 text-[#9a6908]" /> Dragging always asks for confirmation</div>
+    </div>
+    <div className="-mx-4 overflow-x-auto px-4 pb-4 sm:-mx-7 sm:px-7 lg:-mx-10 lg:px-10">
+      <div className="grid min-w-max grid-cols-6 gap-4">
+        {PIPELINE.map((stage, index) => {
+          const rows = items.filter((item) => item.stage === stage && item.lifecycle === 'Active');
+          return <section key={stage} onDragOver={(event) => event.preventDefault()} onDrop={(event) => { event.preventDefault(); const item = items.find((entry) => entry.id === event.dataTransfer.getData('text/content-item')); if (item) onMove(item, stage); }} className={`w-[286px] rounded-2xl border border-t-4 border-[#1f2342]/10 p-3 ${stageStyles[index]}`}>
+            <div className="mb-3 flex items-center justify-between px-1 py-1">
+              <div><p className="text-xs font-semibold text-[#9b6908]">0{index + 1}</p><h2 className="mt-0.5 text-base font-semibold text-[#1f2342]">{stage}</h2></div>
+              <Badge className="bg-white text-[#1f2342] shadow-sm">{rows.length}</Badge>
+            </div>
+            <div className="space-y-3">
+              {rows.map((item) => { const movable = item.status === 'Pending approval' ? canApproveItem(item, roles, person) : canSubmitItem(item, roles, person); const next = PIPELINE[index + 1]; return <article key={item.id} draggable={Boolean(movable && next)} onDragStart={(event) => { event.dataTransfer.setData('text/content-item', item.id); event.dataTransfer.effectAllowed = 'move'; }} className={`group rounded-xl border border-[#1f2342]/9 bg-white p-3.5 shadow-[0_5px_18px_rgba(31,35,66,0.07)] transition hover:-translate-y-0.5 hover:shadow-md ${movable && next ? 'cursor-grab active:cursor-grabbing' : ''}`}>
+                <div className="flex items-start gap-2"><GripVertical className="mt-0.5 size-4 shrink-0 cursor-grab text-[#a7a9b5] group-hover:text-[#6f7285]" /><button onClick={() => onOpen(item.id)} className="min-w-0 flex-1 text-left"><p className="text-sm font-semibold leading-snug text-[#1f2342]">{item.title}</p><p className="mt-1 text-xs text-[#7b7f90]">{item.contentType} · {item.platform}</p></button></div>
+                <div className="mt-3"><StatusBadge item={item} /></div>
+                <div className="mt-4 flex items-center justify-between gap-2"><Owners people={item.accountable} /><span className={`flex items-center gap-1 text-xs ${isOverdue(item) ? 'font-semibold text-[#b34726]' : 'text-[#6f7285]'}`}><Clock3 className="size-3.5" />{dueLabel(item)}</span></div>
+                {next && <Button variant="ghost" size="sm" disabled={!movable} onClick={() => onMove(item, next)} className="mt-3 w-full justify-between text-[#525570]">{item.status === 'Pending approval' ? 'Review handoff' : 'Submit handoff'} <ArrowRight /></Button>}
+              </article>; })}
+              {!rows.length && <div className="rounded-xl border border-dashed border-[#1f2342]/20 bg-white/45 px-3 py-10 text-center text-sm text-[#7b7f90]">Drop the next item here</div>}
+            </div>
+          </section>;
+        })}
+      </div>
+    </div>
+  </>;
 }
 
-function Approvals({ items, role, onOpen, onReview }: { items: ContentItem[]; role: AppRole; onOpen: (id: string) => void; onReview: (item: ContentItem, approved: boolean, note: string) => void }) { const waiting = items.filter((item) => item.status === 'Pending approval'); const secondLens = items.filter((item) => ['Script','Production'].includes(item.stage) && item.secondLens === 'Awaiting review'); return <><PageTitle eyebrow="APPROVAL QUEUE" title={role === 'Content Approver' ? 'Your second-lens queue.' : 'Work waiting for sign-off.'} description="Review the evidence, leave a note and make the next move explicit." /><Tabs defaultValue={role === 'Content Approver' ? 'second' : 'accountable'}><TabsList><TabsTrigger value="accountable">Accountable approval ({waiting.length})</TabsTrigger><TabsTrigger value="second">Second-lens review ({secondLens.length})</TabsTrigger></TabsList><TabsContent value="accountable"><Card className="mt-4 bg-white"><CardContent className="overflow-x-auto px-0 sm:px-4"><ItemTable items={waiting} onOpen={onOpen} /></CardContent></Card></TabsContent><TabsContent value="second"><div className="mt-4 grid gap-4 lg:grid-cols-2">{secondLens.map((item) => <ReviewCard key={item.id} item={item} onOpen={onOpen} onReview={onReview} />)}</div></TabsContent></Tabs></>;
+function MyActions({ actions, onOpen, onReview, onSaveMetric }: { actions: ActionItem[]; onOpen: (id: string) => void; onReview: (item: ContentItem, approved: boolean, note: string) => void; onSaveMetric: (item: ContentItem, values: { views: number; likes: number; comments: number; shares: number }) => void }) {
+  const direct = actions.filter((action) => action.kind === 'approval' || action.kind === 'work');
+  const reviews = actions.filter((action) => action.kind === 'second-lens');
+  const metrics = actions.filter((action) => action.kind === 'metrics');
+  return <>
+    <PageTitle eyebrow="MY ACTIONS" title="Everything you need to act on." description="One personal queue, shaped automatically by your login, roles and assignments." />
+    {!actions.length && <Card className="border-dashed bg-white"><CardContent className="grid place-items-center py-14 text-center"><CheckCircle2 className="mb-3 size-8 text-[#3b9171]" /><p className="font-medium text-[#1f2342]">You are all caught up.</p><p className="mt-1 text-sm text-[#7b7f90]">New assignments and approvals will appear here.</p></CardContent></Card>}
+    {direct.length > 0 && <section className="mb-7"><div className="mb-3 flex items-center gap-2"><h2 className="text-base font-semibold text-[#1f2342]">Next up</h2><Badge variant="secondary">{direct.length}</Badge></div><div className="grid gap-3 xl:grid-cols-2">{direct.map(({ item, label, kind }) => <button key={`${kind}-${item.id}`} onClick={() => onOpen(item.id)} className="flex w-full items-center justify-between gap-4 rounded-2xl border border-[#1f2342]/10 bg-white p-4 text-left shadow-sm transition hover:-translate-y-0.5 hover:shadow-md"><div className="min-w-0"><div className="mb-2 flex flex-wrap items-center gap-2"><Badge className={kind === 'approval' ? 'bg-[#1f2342] text-white' : 'bg-[#f7efdd] text-[#7a5200]'}>{label}</Badge>{isOverdue(item) && <Badge variant="destructive">Overdue</Badge>}</div><p className="font-semibold text-[#1f2342]">{item.title}</p><p className="mt-1 text-sm text-[#6f7285]">{item.stage} · {dueLabel(item)}</p></div><ChevronRight className="size-5 shrink-0 text-[#a1a4b1]" /></button>)}</div></section>}
+    {reviews.length > 0 && <section className="mb-7"><div className="mb-3 flex items-center gap-2"><h2 className="text-base font-semibold text-[#1f2342]">Second-lens review</h2><Badge variant="secondary">{reviews.length}</Badge></div><div className="grid gap-4 lg:grid-cols-2">{reviews.map(({ item }) => <ReviewCard key={item.id} item={item} onOpen={onOpen} onReview={onReview} />)}</div></section>}
+    {metrics.length > 0 && <section><div className="mb-3 flex items-center gap-2"><h2 className="text-base font-semibold text-[#1f2342]">Metrics to record</h2><Badge variant="secondary">{metrics.length}</Badge></div><div className="grid gap-4">{metrics.map(({ item }) => <MetricsCard key={item.id} item={item} onSave={onSaveMetric} onOpen={onOpen} />)}</div></section>}
+  </>;
 }
 
 function ReviewCard({ item, onOpen, onReview }: { item: ContentItem; onOpen: (id: string) => void; onReview: (item: ContentItem, approved: boolean, note: string) => void }) { const [note, setNote] = useState(''); return <Card className="bg-white"><CardHeader><CardTitle>{item.title}</CardTitle><CardDescription>{item.contentType} · {item.stage}</CardDescription><CardAction><Badge className="bg-[#f7efdd] text-[#7a5200]">BuildableLabs</Badge></CardAction></CardHeader><CardContent className="space-y-3"><Textarea value={note} onChange={(event) => setNote(event.target.value)} placeholder="Add review notes (optional for approval)" /><div className="flex flex-wrap gap-2"><Button onClick={() => onReview(item, true, note)}><Check /> Approve review</Button><Button variant="outline" onClick={() => onReview(item, false, note || 'Please revise based on the review feedback.')}><RefreshCw /> Request changes</Button><Button variant="ghost" onClick={() => onOpen(item.id)}>Open item</Button></div></CardContent></Card>; }
@@ -248,13 +347,39 @@ function MiniStat({ label, value }: { label: string; value: number }) { return <
 
 function Stakeholder({ items }: { items: ContentItem[] }) { const active = items.filter((item) => item.lifecycle === 'Active'); const overrides = items.flatMap((item) => item.history.filter((event) => event.flagged).map((event) => ({ item, event }))); return <><PageTitle eyebrow="READ-ONLY OVERVIEW" title="The signal, without the noise." description="A clean view of delivery health, current accountability and exceptional overrides." /><div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4"><MetricCard label="Active items" value={String(active.length)} detail="All stages" icon={CircleGauge} /><MetricCard label="Posted today" value={String(items.filter((item) => item.publishedAt?.startsWith('2026-09-07')).length)} detail="Asia/Kolkata" icon={UploadCloud} /><MetricCard label="Overdue" value={String(active.filter(isOverdue).length)} detail="Needs intervention" icon={AlertTriangle} warning /><MetricCard label="Recent overrides" value={String(overrides.length)} detail="Second-lens exceptions" icon={ShieldCheck} accent /></div><div className="mt-5 grid gap-5 xl:grid-cols-2"><Card className="bg-white"><CardHeader><CardTitle>Who is accountable</CardTitle></CardHeader><CardContent className="space-y-3">{active.slice(0,6).map((item) => <div key={item.id} className="flex items-center justify-between gap-4 rounded-xl border border-[#1f2342]/8 p-3"><div><p className="text-sm font-medium text-[#1f2342]">{item.title}</p><p className="mt-1 text-xs text-[#7b7f90]">{item.stage}</p></div><Owners people={item.accountable} /></div>)}</CardContent></Card><Card className="bg-white"><CardHeader><CardTitle>Recent overrides</CardTitle><CardDescription>Advanced without second-lens sign-off</CardDescription></CardHeader><CardContent className="space-y-3">{overrides.map(({ item, event }) => <Alert key={item.id} className="border-[#dfa126]/40 bg-[#f7efdd]"><AlertTriangle /><AlertTitle>{item.title}</AlertTitle><AlertDescription>{event.note} · {event.actor}</AlertDescription></Alert>)}</CardContent></Card></div></>;
 }
-function People({ people, demoMode }: { people: Person[]; demoMode: boolean }) { return <><PageTitle eyebrow="PEOPLE & ROLES" title="Accountability is assigned, not assumed." description="Users can hold more than one role. Admins can assign multiple accountable owners at every stage." />{demoMode && <Alert className="mb-5 border-[#dfa126]/40 bg-[#f7efdd]"><UserRound /><AlertTitle>Demonstration team</AlertTitle><AlertDescription>These are fictional users. Real users will appear here after Supabase is connected and invitations are sent.</AlertDescription></Alert>}<div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">{people.map((person) => <Card key={person.id} className="bg-white"><CardHeader><div className="flex items-center gap-3"><Avatar person={person} /><div><CardTitle>{person.name}</CardTitle><CardDescription>{person.email}</CardDescription></div></div></CardHeader><CardContent className="flex flex-wrap gap-2">{person.roles.map((role) => <Badge key={role} variant="secondary">{role}</Badge>)}</CardContent></Card>)}</div></>;
+function People({ people, demoMode, onManage }: { people: Person[]; demoMode: boolean; onManage: (person: Person, active: boolean, roles: AppRole[]) => void }) {
+  const owners = people.filter((person) => person.roles.includes('Owner'));
+  return <>
+    <PageTitle eyebrow="PEOPLE & ACCESS" title="Give each person only what they need." description="The two Owner accounts stay protected. Owners can activate anyone else and assign one or more working roles." />
+    <div className="mb-5 grid gap-4 lg:grid-cols-[1fr_1.3fr]">
+      <Alert className="border-[#dfa126]/40 bg-[#f7efdd]"><ShieldCheck /><AlertTitle>{owners.length}/2 protected Owner accounts</AlertTitle><AlertDescription>Owners have unrestricted access and are the only people who can grant or change app access. Admins run all content operations but cannot appoint Owners.</AlertDescription></Alert>
+      {demoMode && <Alert className="border-[#1f2342]/15 bg-white"><UserRound /><AlertTitle>Demonstration team</AlertTitle><AlertDescription>Changes work in this preview only. After Supabase is connected, signed-in users appear here and Owner changes persist.</AlertDescription></Alert>}
+    </div>
+    <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">{people.map((person) => <AccessCard key={person.id} person={person} onManage={onManage} />)}</div>
+  </>;
+}
+
+function AccessCard({ person, onManage }: { person: Person; onManage: (person: Person, active: boolean, roles: AppRole[]) => void }) {
+  const isOwner = person.roles.includes('Owner');
+  const [active, setActive] = useState(person.isActive !== false);
+  const [roles, setRoles] = useState<AppRole[]>(person.roles.filter((role) => role !== 'Owner'));
+  const assignable: Exclude<AppRole, 'Owner'>[] = ['Admin', 'Content Producer', 'Content Approver', 'Monitoring', 'Read-only Stakeholder'];
+  return <Card className={`bg-white ${isOwner ? 'ring-1 ring-[#dfa126]/50' : ''}`}>
+    <CardHeader><div className="flex items-start gap-3"><Avatar person={person} /><div className="min-w-0 flex-1"><CardTitle className="truncate">{person.name}</CardTitle><CardDescription className="truncate">{person.email}</CardDescription></div>{isOwner && <Badge className="bg-[#1f2342] text-white">Owner</Badge>}</div></CardHeader>
+    <CardContent>
+      {isOwner ? <p className="rounded-xl bg-[#f7efdd] p-3 text-sm text-[#6b5b35]">Protected full-access ID. Owner access is configured securely during backend setup and cannot be changed here.</p> : <>
+        <label className="mb-3 flex items-center justify-between rounded-xl border border-[#1f2342]/10 p-3 text-sm font-medium"><span>App access</span><Checkbox checked={active} onCheckedChange={(checked) => setActive(Boolean(checked))} /></label>
+        <div className="space-y-2">{assignable.map((role) => <label key={role} className="flex cursor-pointer items-center gap-2.5 text-sm text-[#525570]"><Checkbox checked={roles.includes(role)} onCheckedChange={(checked) => setRoles(checked ? [...roles, role] : roles.filter((entry) => entry !== role))} />{role}</label>)}</div>
+        <Button className="mt-4 w-full" disabled={active && roles.length === 0} onClick={() => onManage(person, active, roles)}>Save access</Button>
+      </>}
+    </CardContent>
+  </Card>;
 }
 function Settings({ demoMode }: { demoMode: boolean }) { const [hours, setHours] = useState(24); return <><PageTitle eyebrow="PIPELINE SETTINGS" title="Defaults that keep the team moving." description="Admins can tune reminders and the controlled lists used when new content is created." /><div className="grid gap-5 lg:grid-cols-2"><Card className="bg-white"><CardHeader><CardTitle>Due-date reminders</CardTitle><CardDescription>Default lead time for new items</CardDescription></CardHeader><CardContent><Label className="mb-2">Hours before due date</Label><div className="flex max-w-xs gap-2"><Input type="number" min="0" max="720" value={hours} onChange={(event) => setHours(Number(event.target.value))} /><Button onClick={() => undefined}>Save</Button></div><p className="mt-3 text-xs text-[#7b7f90]">Each content item can override this value manually. Overdue alerts repeat daily.</p></CardContent></Card><Card className="bg-white"><CardHeader><CardTitle>Email delivery</CardTitle><CardDescription>Resend notification adapter</CardDescription></CardHeader><CardContent><div className="flex items-center gap-2"><span className="size-2 rounded-full bg-[#dfa126]" /><p className="text-sm font-medium">Waiting for API key</p></div><p className="mt-3 text-sm text-[#6b7280]">Notifications are queued safely. Add the Resend API key and verified sender later to begin delivery.</p>{demoMode && <Badge className="mt-4 bg-[#eceef7] text-[#1f2342]">Demo mode</Badge>}</CardContent></Card></div></>;
 }
 
-function ItemDetail({ open, item, role, busy, onOpenChange, onSubmit, onApprove, onRequestChanges, onComment, onMetric }: { open: boolean; item?: ContentItem; role: AppRole; busy: boolean; onOpenChange: (open: boolean) => void; onSubmit: (item: ContentItem) => void; onApprove: (item: ContentItem) => void; onRequestChanges: (item: ContentItem, note: string) => void; onComment: (item: ContentItem, body: string, parentId?: string) => void; onMetric: (item: ContentItem, values: { views: number; likes: number; comments: number; shares: number }) => void }) {
-  const [comment, setComment] = useState(''); const [changeNote, setChangeNote] = useState(''); if (!item) return null; const readOnly = role === 'Read-only Stakeholder';
+function ItemDetail({ open, item, roles, person, busy, onOpenChange, onSubmit, onApprove, onRequestChanges, onComment, onMetric }: { open: boolean; item?: ContentItem; roles: AppRole[]; person: Person; busy: boolean; onOpenChange: (open: boolean) => void; onSubmit: (item: ContentItem) => void; onApprove: (item: ContentItem) => void; onRequestChanges: (item: ContentItem, note: string) => void; onComment: (item: ContentItem, body: string, parentId?: string) => void; onMetric: (item: ContentItem, values: { views: number; likes: number; comments: number; shares: number }) => void }) {
+  const [comment, setComment] = useState(''); const [changeNote, setChangeNote] = useState(''); if (!item) return null; const readOnly = roles.length === 1 && roles[0] === 'Read-only Stakeholder'; const canSubmit = canSubmitItem(item, roles, person); const canApprove = canApproveItem(item, roles, person);
   return (
     <Sheet open={open} onOpenChange={onOpenChange}>
       <SheetContent className="w-full overflow-y-auto sm:max-w-2xl">
@@ -365,7 +490,7 @@ function ItemDetail({ open, item, role, busy, onOpenChange, onSubmit, onApprove,
                 ))}
                 {!item.metrics.length && <p className="py-6 text-center text-sm text-[#7b7f90]">No metrics recorded yet.</p>}
               </div>
-              {!readOnly && item.stage === 'Post-Upload Metrics' && <MetricsCard item={item} onSave={onMetric} onOpen={() => undefined} />}
+              {hasAnyRole(roles, ['Owner', 'Admin', 'Monitoring']) && item.stage === 'Post-Upload Metrics' && <MetricsCard item={item} onSave={onMetric} onOpen={() => undefined} />}
             </TabsContent>
           </Tabs>
         </div>
@@ -373,7 +498,7 @@ function ItemDetail({ open, item, role, busy, onOpenChange, onSubmit, onApprove,
         {!readOnly && (
           <SheetFooter className="sticky bottom-0 border-t bg-white px-5 py-4">
             <div className="w-full space-y-2">
-              {item.status === 'Pending approval' ? (
+              {item.status === 'Pending approval' && canApprove ? (
                 <>
                   <Textarea value={changeNote} onChange={(event) => setChangeNote(event.target.value)} placeholder="Required only when requesting changes" />
                   <div className="flex flex-wrap gap-2">
@@ -381,7 +506,7 @@ function ItemDetail({ open, item, role, busy, onOpenChange, onSubmit, onApprove,
                     <Button disabled={busy} variant="outline" onClick={() => onRequestChanges(item, changeNote)}><X /> Request changes</Button>
                   </div>
                 </>
-              ) : item.lifecycle === 'Active' ? (
+              ) : item.lifecycle === 'Active' && item.status !== 'Pending approval' && canSubmit ? (
                 <Button disabled={busy} onClick={() => onSubmit(item)}><FileCheck2 /> Submit {item.stage} for approval</Button>
               ) : null}
             </div>
@@ -397,8 +522,13 @@ function CreateDialog({ open, onOpenChange, people, onCreate }: { open: boolean;
   return <Dialog open={open} onOpenChange={onOpenChange}><DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-xl"><DialogHeader><DialogTitle className="font-display text-xl">Create content item</DialogTitle><DialogDescription>Start in Idea and assign the people who will get it moving.</DialogDescription></DialogHeader><form onSubmit={submit} className="space-y-4"><div><Label className="mb-1.5">Title</Label><Input value={title} onChange={(event) => setTitle(event.target.value)} placeholder="e.g. Five habits of confident wealth advisors" required /></div><div className="grid gap-3 sm:grid-cols-2"><div><Label className="mb-1.5">Content type</Label><NativeSelect className="w-full" value={contentType} onChange={(event) => setContentType(event.target.value)}>{['Instagram Reel','Instagram Post','YouTube Video','YouTube Short','LinkedIn Post','Carousel'].map((value) => <NativeSelectOption key={value}>{value}</NativeSelectOption>)}</NativeSelect></div><div><Label className="mb-1.5">Platform</Label><NativeSelect className="w-full" value={platform} onChange={(event) => setPlatform(event.target.value)}>{['Instagram','YouTube','LinkedIn','Facebook'].map((value) => <NativeSelectOption key={value}>{value}</NativeSelectOption>)}</NativeSelect></div></div><div className="grid gap-3 sm:grid-cols-2"><div><Label className="mb-1.5">Idea due date</Label><Input type="datetime-local" value={dueAt} onChange={(event) => setDueAt(event.target.value)} /></div><div><Label className="mb-1.5">Responsible producer</Label><NativeSelect className="w-full" value={responsibleId} onChange={(event) => setResponsibleId(event.target.value)}>{people.map((person) => <NativeSelectOption key={person.id} value={person.id}>{person.name}</NativeSelectOption>)}</NativeSelect></div></div><div><Label>Accountable owners</Label><p className="mb-2 mt-1 text-xs text-[#7b7f90]">Choose one or more people. Any accountable owner can approve the transition.</p><div className="grid gap-2 sm:grid-cols-2">{people.map((person) => <label key={person.id} className="flex cursor-pointer items-center gap-2 rounded-lg border p-2.5 text-sm"><Checkbox checked={accountableIds.includes(person.id)} onCheckedChange={(checked) => setAccountableIds(checked ? [...accountableIds, person.id] : accountableIds.filter((id) => id !== person.id))} />{person.name}</label>)}</div></div><label className="flex items-start gap-3 rounded-xl bg-[#f7efdd] p-3 text-sm"><Checkbox checked={copyOwners} onCheckedChange={(checked) => setCopyOwners(Boolean(checked))} /><span><strong className="block text-[#1f2342]">Plan accountability ahead</strong><span className="text-[#6b5b35]">Copy these owners across all six stages. Admin can revise each stage later.</span></span></label><DialogFooter className="mx-0 mb-0"><Button type="button" variant="outline" onClick={() => onOpenChange(false)}>Cancel</Button><Button type="submit" disabled={!title.trim() || !accountableIds.length}>Create item</Button></DialogFooter></form></DialogContent></Dialog>;
 }
 
-function OverrideDialog({ item, onOpenChange, onConfirm }: { item?: ContentItem; onOpenChange: (open: boolean) => void; onConfirm: (item: ContentItem, reason: string) => void }) { const [reason, setReason] = useState(''); return <Dialog open={Boolean(item)} onOpenChange={onOpenChange}><DialogContent><DialogHeader><DialogTitle>Advance without second-lens review?</DialogTitle><DialogDescription>This exception will be flagged in the item history and emailed to admins and reviewers.</DialogDescription></DialogHeader><Textarea value={reason} onChange={(event) => setReason(event.target.value)} placeholder="Why does this item need to advance now?" /><DialogFooter><Button variant="outline" onClick={() => onOpenChange(false)}>Cancel</Button><Button disabled={!item || reason.trim().length < 6} onClick={() => item && onConfirm(item, reason.trim())}>Record override & advance</Button></DialogFooter></DialogContent></Dialog>; }
+function OverrideDialog({ item, onOpenChange, onConfirm }: { item?: ContentItem; onOpenChange: (open: boolean) => void; onConfirm: (item: ContentItem, reason: string) => void }) { const [reason, setReason] = useState(''); return <Dialog open={Boolean(item)} onOpenChange={onOpenChange}><DialogContent><DialogHeader><DialogTitle>Advance without second-lens review?</DialogTitle><DialogDescription>This exception will be flagged in the item history and emailed to Owners, admins and reviewers.</DialogDescription></DialogHeader><Textarea value={reason} onChange={(event) => setReason(event.target.value)} placeholder="Why does this item need to advance now?" /><DialogFooter><Button variant="outline" onClick={() => onOpenChange(false)}>Cancel</Button><Button disabled={!item || reason.trim().length < 6} onClick={() => item && onConfirm(item, reason.trim())}>Record override & advance</Button></DialogFooter></DialogContent></Dialog>; }
 
-function LoginScreen({ client, notice, setNotice }: { client: SupabaseClient; notice: string; setNotice: (value: string) => void }) { const [email, setEmail] = useState(''); const [password, setPassword] = useState(''); const [busy, setBusy] = useState(false); const submit = async (event: FormEvent) => { event.preventDefault(); setBusy(true); const { error } = await client.auth.signInWithPassword({ email, password }); if (error) setNotice(error.message); setBusy(false); }; return <div className="grid min-h-svh place-items-center bg-[#f4f1ea] p-4"><div className="w-full max-w-md"><div className="mb-7 flex items-center justify-center gap-3"><div className="brand-mark !text-[#dfa126]">A</div><div><p className="font-display text-xl font-semibold text-[#1f2342]">AAFM India</p><p className="text-xs text-[#6b7280]">Content Ops Tracker</p></div></div><Card className="bg-white p-2 shadow-xl"><CardHeader><CardTitle className="font-display text-2xl">Sign in</CardTitle><CardDescription>Use the email and password assigned by your administrator.</CardDescription></CardHeader><CardContent><form onSubmit={submit} className="space-y-4"><div><Label className="mb-1.5">Email</Label><Input type="email" value={email} onChange={(event) => setEmail(event.target.value)} required /></div><div><Label className="mb-1.5">Password</Label><Input type="password" value={password} onChange={(event) => setPassword(event.target.value)} required /></div>{notice && <p className="text-sm text-[#b34726]">{notice}</p>}<Button className="w-full" disabled={busy}>{busy ? 'Signing in…' : 'Sign in'}</Button></form></CardContent></Card><p className="mt-4 text-center text-xs text-[#7b7f90]">Invite-only access · Asia/Kolkata</p></div></div>; }
+function MoveDialog({ intent, onOpenChange, onConfirm }: { intent?: MoveIntent; onOpenChange: (open: boolean) => void; onConfirm: () => void }) {
+  const approving = intent?.item.status === 'Pending approval';
+  return <Dialog open={Boolean(intent)} onOpenChange={onOpenChange}><DialogContent><DialogHeader><DialogTitle>{approving ? `Approve the move to ${intent?.toStage}?` : `Submit ${intent?.item.stage} for approval?`}</DialogTitle><DialogDescription>{approving ? 'This records your approval and moves the card forward. Script and Production still require second-lens approval or a documented override.' : `The card will stay in ${intent?.item.stage} until an accountable owner approves it. Nothing moves silently.`}</DialogDescription></DialogHeader>{intent && <div className="rounded-xl bg-[#f4f1ea] p-4"><p className="font-medium text-[#1f2342]">{intent.item.title}</p><p className="mt-1 text-sm text-[#6f7285]">{intent.item.stage} <ArrowRight className="mx-1 inline size-4" /> {intent.toStage}</p></div>}<DialogFooter><Button variant="outline" onClick={() => onOpenChange(false)}>Cancel</Button><Button onClick={onConfirm}>{approving ? 'Approve & move' : 'Submit for approval'}</Button></DialogFooter></DialogContent></Dialog>;
+}
+
+function LoginScreen({ client, notice, setNotice }: { client: SupabaseClient; notice: string; setNotice: (value: string) => void }) { const [email, setEmail] = useState(''); const [password, setPassword] = useState(''); const [busy, setBusy] = useState(false); const submit = async (event: FormEvent) => { event.preventDefault(); setBusy(true); const { error } = await client.auth.signInWithPassword({ email, password }); if (error) setNotice(error.message); setBusy(false); }; return <div className="grid min-h-svh place-items-center bg-[#f4f1ea] p-4"><div className="w-full max-w-md"><div className="mb-7 flex items-center justify-center gap-3"><div className="brand-mark !text-[#dfa126]">A</div><div><p className="font-display text-xl font-semibold text-[#1f2342]">AAFM India</p><p className="text-xs text-[#6b7280]">Content Ops Tracker</p></div></div><Card className="bg-white p-2 shadow-xl"><CardHeader><CardTitle className="font-display text-2xl">Sign in</CardTitle><CardDescription>Use the email and password assigned by an Owner.</CardDescription></CardHeader><CardContent><form onSubmit={submit} className="space-y-4"><div><Label className="mb-1.5">Email</Label><Input type="email" value={email} onChange={(event) => setEmail(event.target.value)} required /></div><div><Label className="mb-1.5">Password</Label><Input type="password" value={password} onChange={(event) => setPassword(event.target.value)} required /></div>{notice && <p className="text-sm text-[#b34726]">{notice}</p>}<Button className="w-full" disabled={busy}>{busy ? 'Signing in…' : 'Sign in'}</Button></form></CardContent></Card><p className="mt-4 text-center text-xs text-[#7b7f90]">Invite-only access · Asia/Kolkata</p></div></div>; }
 function LoadingScreen() { return <div className="grid min-h-svh place-items-center bg-[#f4f1ea]"><div className="text-center"><div className="mx-auto mb-4 size-9 animate-spin rounded-full border-2 border-[#dfa126] border-t-transparent" /><p className="text-sm text-[#525570]">Opening content operations…</p></div></div>; }
-function PendingAccess({ email, signOut }: { email: string; signOut: () => void }) { return <div className="grid min-h-svh place-items-center bg-[#f4f1ea] p-4"><Card className="max-w-md bg-white"><CardHeader><CardTitle>Access is waiting for an administrator</CardTitle><CardDescription>{email}</CardDescription></CardHeader><CardContent><p className="text-sm text-[#525570]">Your account is valid, but it needs an active profile and at least one role before the workspace can open.</p><Button variant="outline" className="mt-4" onClick={signOut}>Sign out</Button></CardContent></Card></div>; }
+function PendingAccess({ email, signOut }: { email: string; signOut: () => void }) { return <div className="grid min-h-svh place-items-center bg-[#f4f1ea] p-4"><Card className="max-w-md bg-white"><CardHeader><CardTitle>Access is waiting for an Owner</CardTitle><CardDescription>{email}</CardDescription></CardHeader><CardContent><p className="text-sm text-[#525570]">Your account is valid. One of the two workspace Owners needs to activate it and assign at least one role.</p><Button variant="outline" className="mt-4" onClick={signOut}>Sign out</Button></CardContent></Card></div>; }

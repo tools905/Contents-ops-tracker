@@ -10,8 +10,9 @@ function initials(name: string) { return name.split(/\s+/).map((part) => part[0]
 export type LiveSnapshot = { currentUser: Person; currentUserActive: boolean; people: Person[]; items: ContentItem[] };
 
 export async function loadLiveSnapshot(client: SupabaseClient, user: User): Promise<LiveSnapshot> {
-  const [profilesRes, rolesRes, itemsRes, assignmentsRes, reviewsRes, linksRes, historyRes, commentsRes, metricsRes] = await Promise.all([
+  const [profilesRes, ownersRes, rolesRes, itemsRes, assignmentsRes, reviewsRes, linksRes, historyRes, commentsRes, metricsRes] = await Promise.all([
     client.from('profiles').select('id,email,full_name,is_active'),
+    client.from('workspace_owners').select('profile_id,slot'),
     client.from('user_roles').select('profile_id,role'),
     client.from('content_items').select('*').order('updated_at', { ascending: false }),
     client.from('item_stage_assignments').select('*'),
@@ -21,13 +22,15 @@ export async function loadLiveSnapshot(client: SupabaseClient, user: User): Prom
     client.from('comments').select('*').order('created_at', { ascending: true }),
     client.from('metrics_entries').select('*').order('recorded_on', { ascending: false }),
   ]);
-  const error = [profilesRes, rolesRes, itemsRes, assignmentsRes, reviewsRes, linksRes, historyRes, commentsRes, metricsRes].find((result) => result.error)?.error;
+  const error = [profilesRes, ownersRes, rolesRes, itemsRes, assignmentsRes, reviewsRes, linksRes, historyRes, commentsRes, metricsRes].find((result) => result.error)?.error;
   if (error) throw error;
 
   const roleRows = rolesRes.data ?? [];
   const people: Person[] = (profilesRes.data ?? []).map((profile) => {
     const name = profile.full_name || profile.email.split('@')[0];
-    return { id: profile.id, email: profile.email, name, initials: initials(name), roles: roleRows.filter((row) => row.profile_id === profile.id).map((row) => roleFromDb[row.role]).filter(Boolean) };
+    const roles = roleRows.filter((row) => row.profile_id === profile.id).map((row) => roleFromDb[row.role]).filter(Boolean);
+    if ((ownersRes.data ?? []).some((owner) => owner.profile_id === profile.id)) roles.unshift('Owner');
+    return { id: profile.id, email: profile.email, name, initials: initials(name), roles, isActive: profile.is_active };
   });
   const personById = new Map(people.map((person) => [person.id, person]));
   const fallbackPerson = (id: string): Person => personById.get(id) ?? { id, name: 'Former team member', email: '', initials: 'FT', roles: [] };

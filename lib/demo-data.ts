@@ -1,7 +1,7 @@
 import type { ContentItem, Person } from './content-types';
 
 export const demoPeople: Person[] = [
-  { id: 'p1', name: 'Aditi Mehra', email: 'aditi@aafmindia.test', initials: 'AM', roles: ['Admin'] },
+  { id: 'p1', name: 'Aditi Mehra', email: 'aditi@aafmindia.test', initials: 'AM', roles: ['Owner'], isActive: true },
   { id: 'p2', name: 'Nisha Verma', email: 'nisha@aafmindia.test', initials: 'NV', roles: ['Content Producer'] },
   { id: 'p3', name: 'Rohit Saini', email: 'rohit@aafmindia.test', initials: 'RS', roles: ['Content Producer'] },
   { id: 'p4', name: 'Aman Khanna', email: 'aman@aafmindia.test', initials: 'AK', roles: ['Content Producer'] },
@@ -9,13 +9,15 @@ export const demoPeople: Person[] = [
   { id: 'p6', name: 'BuildableLabs', email: 'review@buildablelabs.test', initials: 'BL', roles: ['Content Approver'] },
   { id: 'p7', name: 'Kabir Rao', email: 'kabir@aafmindia.test', initials: 'KR', roles: ['Monitoring'] },
   { id: 'p8', name: 'Regional Head', email: 'stakeholder@aafmindia.test', initials: 'RH', roles: ['Read-only Stakeholder'] },
+  { id: 'p9', name: 'Operations Director', email: 'operations@aafmindia.test', initials: 'OD', roles: ['Owner'], isActive: true },
+  { id: 'p10', name: 'Content Lead', email: 'lead@aafmindia.test', initials: 'CL', roles: ['Admin'], isActive: true },
 ];
 
-const [admin, nisha, rohit, aman, meera, , monitor] = demoPeople;
+const [owner, nisha, rohit, aman, meera, , monitor] = demoPeople;
 
 export const demoItems: ContentItem[] = [
   {
-    id: 'c1', title: 'CWM: Career paths in private banking', contentType: 'Instagram Reel', platform: 'Instagram', stage: 'Script', status: 'Pending approval', dueAt: '2026-09-07T17:30:00+05:30', reminderHours: 24, lifecycle: 'Active', responsible: [nisha], accountable: [nisha, admin], secondLens: 'Awaiting review',
+    id: 'c1', title: 'CWM: Career paths in private banking', contentType: 'Instagram Reel', platform: 'Instagram', stage: 'Script', status: 'Pending approval', dueAt: '2026-09-07T17:30:00+05:30', reminderHours: 24, lifecycle: 'Active', responsible: [nisha], accountable: [nisha, owner], secondLens: 'Awaiting review',
     links: [{ label: 'Working script', kind: 'Script', url: 'https://docs.google.com/' }],
     history: [
       { action: 'Item created', actor: 'Nisha Verma', at: '5 Sep · 10:20 AM' },
@@ -38,7 +40,7 @@ export const demoItems: ContentItem[] = [
     links: [{ label: 'Shoot brief', kind: 'Brief', url: 'https://docs.google.com/' }], history: [{ action: 'Item created', actor: 'Aman Khanna', at: '1 Sep · 2:20 PM' }, { action: 'Script approved → Shoot', actor: 'Nisha Verma', at: '6 Sep · 5:42 PM' }], comments: [], metrics: [],
   },
   {
-    id: 'c4', title: 'What makes the CTEP designation different?', contentType: 'YouTube Short', platform: 'YouTube', stage: 'Production', status: 'Changes requested', dueAt: '2026-09-06T18:00:00+05:30', reminderHours: 24, lifecycle: 'Active', responsible: [rohit], accountable: [rohit, admin], secondLens: 'Changes requested',
+    id: 'c4', title: 'What makes the CTEP designation different?', contentType: 'YouTube Short', platform: 'YouTube', stage: 'Production', status: 'Changes requested', dueAt: '2026-09-06T18:00:00+05:30', reminderHours: 24, lifecycle: 'Active', responsible: [rohit], accountable: [rohit, owner], secondLens: 'Changes requested',
     links: [{ label: 'Raw interview', kind: 'Raw footage', url: 'https://dropbox.com/' }, { label: 'Edit v2', kind: 'Edited video', url: 'https://drive.google.com/' }], history: [{ action: 'Production changes requested', actor: 'BuildableLabs', at: 'Yesterday · 4:08 PM', note: 'Tighten the transition at 00:18 and bring the designation name on-screen sooner.' }], comments: [{ id: 'm4', author: 'BuildableLabs', initials: 'BL', body: 'Please bring the CTEP title card forward to the first three seconds.', at: 'Yesterday · 4:08 PM' }], metrics: [],
   },
   {
@@ -55,6 +57,6 @@ export const demoItems: ContentItem[] = [
     metrics: [{ id: 'me1', platform: 'LinkedIn', views: 8240, likes: 311, comments: 26, shares: 49, recordedOn: '2026-09-06' }],
   },
   {
-    id: 'c8', title: 'Ask an advisor: choosing a finance credential', contentType: 'YouTube Video', platform: 'YouTube', stage: 'Idea', status: 'In progress', dueAt: '2026-09-10T17:00:00+05:30', reminderHours: 24, lifecycle: 'Active', responsible: [meera], accountable: [admin], secondLens: 'Not needed', links: [], history: [{ action: 'Item created', actor: 'Meera Shah', at: 'Today · 1:35 PM' }], comments: [], metrics: [],
+    id: 'c8', title: 'Ask an advisor: choosing a finance credential', contentType: 'YouTube Video', platform: 'YouTube', stage: 'Idea', status: 'In progress', dueAt: '2026-09-10T17:00:00+05:30', reminderHours: 24, lifecycle: 'Active', responsible: [meera], accountable: [owner], secondLens: 'Not needed', links: [], history: [{ action: 'Item created', actor: 'Meera Shah', at: 'Today · 1:35 PM' }], comments: [], metrics: [],
   },
 ];

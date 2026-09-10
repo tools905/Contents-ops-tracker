@@ -48,16 +48,18 @@
   --radius-4xl: calc(var(--radius) * 2.6);
 }
 
-body { font-family: 'Plus Jakarta Sans', Inter, ui-sans-serif, system-ui, sans-serif; }
+body {
+  font-family: 'Plus Jakarta Sans', Inter, ui-sans-serif, system-ui, sans-serif;
+}
 
 :root {
-  --background: #f4f1ea;
-  --foreground: #1f2342;
+  --background: #f5f4f0;
+  --foreground: #30375f;
   --card: #ffffff;
   --card-foreground: #1f2342;
   --popover: oklch(1 0 0);
   --popover-foreground: oklch(0.145 0 0);
-  --primary: #1f2342;
+  --primary: #30375f;
   --primary-foreground: #ffffff;
   --secondary: oklch(0.97 0 0);
   --secondary-foreground: oklch(0.205 0 0);
@@ -68,27 +70,33 @@ body { font-family: 'Plus Jakarta Sans', Inter, ui-sans-serif, system-ui, sans-s
   --destructive: oklch(0.577 0.245 27.325);
   --border: #dfe1e8;
   --input: #d5d7df;
-  --ring: #dfa126;
-  --chart-1: #dfa126;
-  --chart-2: #1f2342;
+  --ring: #f0a42d;
+  --chart-1: #f0a42d;
+  --chart-2: #30375f;
   --chart-3: #5485a6;
   --chart-4: #7c5ca4;
   --chart-5: #3a9b77;
   --radius: 0.75rem;
-  --sidebar: #1f2342;
+  --sidebar: #252b4b;
   --sidebar-foreground: #ffffff;
   --sidebar-primary: oklch(0.205 0 0);
   --sidebar-primary-foreground: oklch(0.985 0 0);
-  --sidebar-accent: rgba(255,255,255,.1);
+  --sidebar-accent: rgba(255, 255, 255, 0.1);
   --sidebar-accent-foreground: #ffffff;
-  --sidebar-border: rgba(255,255,255,.1);
-  --sidebar-ring: #dfa126;
+  --sidebar-border: rgba(255, 255, 255, 0.1);
+  --sidebar-ring: #f0a42d;
 }
 
-.font-display { font-family: 'Source Serif 4', Georgia, 'Times New Roman', serif; }
-.brand-name { font-family: 'Source Serif 4', Georgia, serif; font-size: 1.05rem; font-weight: 650; color: white; line-height: 1.2; }
-.brand-mark { display: grid; width: 2.35rem; height: 2.35rem; place-items: center; border: 1px solid rgba(223,161,38,.7); color: #f0c254; font-family: Georgia, serif; font-size: 1.2rem; font-weight: 700; transform: rotate(45deg); border-radius: .35rem; }
-.brand-mark::first-letter { display: inline-block; transform: rotate(-45deg); }
+.font-display {
+  font-family: 'Source Serif 4', Georgia, 'Times New Roman', serif;
+}
+.brand-name {
+  font-family: 'Source Serif 4', Georgia, serif;
+  font-size: 1.05rem;
+  font-weight: 650;
+  color: white;
+  line-height: 1.2;
+}
 
 .dark {
   --background: oklch(0.145 0 0);

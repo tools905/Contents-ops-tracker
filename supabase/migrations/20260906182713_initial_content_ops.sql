@@ -10,6 +10,11 @@ create type public.history_action as enum ('created', 'submitted', 'approved', '
 create type public.link_kind as enum ('script', 'raw_footage', 'edited_video', 'published_post', 'brief', 'other');
 create type public.notification_kind as enum ('approval_needed', 'due_soon', 'overdue', 'new_comment', 'override_used');
 create type public.delivery_status as enum ('pending', 'sent', 'failed', 'skipped');
+create type public.content_pillar as enum ('knowledge', 'promotional', 'aafm_india_insider');
+create type public.lead_status as enum ('new', 'qualified', 'follow_up_due', 'converted');
+create type public.inbox_status as enum ('needs_reply', 'auto_response_sent', 'resolved');
+create type public.request_status as enum ('new', 'accepted', 'scheduled');
+create type public.request_priority as enum ('normal', 'urgent');
 
 create table public.profiles (
   id uuid primary key references auth.users(id) on delete cascade,
@@ -33,6 +38,8 @@ create table public.content_items (
   title text not null check (char_length(trim(title)) between 2 and 180),
   content_type text not null,
   platform text not null,
+  content_pillar public.content_pillar not null default 'knowledge',
+  workflow_step text not null default 'Topic research',
   current_stage public.pipeline_stage not null default 'idea',
   stage_status public.stage_status not null default 'in_progress',
   lifecycle public.item_lifecycle not null default 'active',
@@ -115,6 +122,43 @@ create table public.metrics_entries (
   unique (content_item_id, platform, recorded_on, source)
 );
 
+create table public.leads (
+  id uuid primary key default gen_random_uuid(),
+  full_name text not null,
+  source text not null,
+  interest text not null,
+  routed_department text not null,
+  status public.lead_status not null default 'new',
+  next_follow_up_at timestamptz,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+create table public.engagement_inbox (
+  id uuid primary key default gen_random_uuid(),
+  person_name text not null,
+  channel text not null,
+  message text not null,
+  detected_keyword text,
+  is_sensitive boolean not null default false,
+  status public.inbox_status not null default 'needs_reply',
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+create table public.department_requests (
+  id uuid primary key default gen_random_uuid(),
+  department text not null,
+  requester_name text not null,
+  request_text text not null check (char_length(trim(request_text)) between 2 and 2000),
+  priority public.request_priority not null default 'normal',
+  needed_by date not null,
+  status public.request_status not null default 'new',
+  created_by uuid not null references public.profiles(id),
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
 create table public.notifications (
   id bigint generated always as identity primary key,
   recipient_id uuid not null references public.profiles(id) on delete cascade,
@@ -150,6 +194,7 @@ create table public.app_settings (
 insert into public.app_settings (key, value) values
   ('timezone', '"Asia/Kolkata"'::jsonb),
   ('default_reminder_hours', '24'::jsonb),
+  ('content_mix_targets', '{"knowledge":60,"promotional":20,"aafm_india_insider":20}'::jsonb),
   ('platforms', '["Instagram", "YouTube", "LinkedIn", "Facebook"]'::jsonb),
   ('content_types', '["Instagram Reel", "Instagram Post", "YouTube Video", "YouTube Short", "LinkedIn Post", "Carousel"]'::jsonb);
 
@@ -169,6 +214,9 @@ create index comments_parent_idx on public.comments (parent_id) where parent_id 
 create index comments_author_idx on public.comments (author_id);
 create index metrics_item_date_idx on public.metrics_entries (content_item_id, recorded_on desc);
 create index metrics_recorded_by_idx on public.metrics_entries (recorded_by);
+create index leads_status_follow_up_idx on public.leads (status, next_follow_up_at);
+create index engagement_inbox_status_idx on public.engagement_inbox (status, created_at desc);
+create index department_requests_status_needed_idx on public.department_requests (status, needed_by);
 create index notifications_recipient_created_idx on public.notifications (recipient_id, created_at desc);
 create index notifications_item_idx on public.notifications (content_item_id) where content_item_id is not null;
 create index email_outbox_pending_idx on public.email_outbox (status, created_at) where status in ('pending', 'failed');
@@ -234,6 +282,9 @@ create trigger profiles_touch before update on public.profiles for each row exec
 create trigger content_items_touch before update on public.content_items for each row execute function private.touch_updated_at();
 create trigger stage_reviews_touch before update on public.stage_reviews for each row execute function private.touch_updated_at();
 create trigger comments_touch before update on public.comments for each row execute function private.touch_updated_at();
+create trigger leads_touch before update on public.leads for each row execute function private.touch_updated_at();
+create trigger engagement_inbox_touch before update on public.engagement_inbox for each row execute function private.touch_updated_at();
+create trigger department_requests_touch before update on public.department_requests for each row execute function private.touch_updated_at();
 
 create or replace function private.handle_new_auth_user()
 returns trigger language plpgsql security definer set search_path = '' as $$
@@ -336,6 +387,7 @@ begin
     values (item.id, item.current_stage, null, 'closed', (select auth.uid()), p_override_reason);
   else
     update public.content_items set current_stage = next_stage, stage_status = 'in_progress', due_at = p_next_due_at,
+      workflow_step = case next_stage when 'script' then 'Drafting' when 'shoot' then 'Shoot brief' when 'production' then 'Edit or design' when 'upload' then 'Platform scheduling' else 'Engagement monitoring' end,
       published_at = case when next_stage = 'post_upload_metrics' then coalesce(published_at, now()) else published_at end
     where id = item.id returning * into item;
     insert into public.stage_history (content_item_id, from_stage, to_stage, action, actor_id, note, metadata)
@@ -417,15 +469,42 @@ begin
 end;
 $$;
 
+create or replace function public.update_workflow_step(p_item_id uuid, p_workflow_step text)
+returns public.content_items language plpgsql security definer set search_path = '' as $$
+declare item public.content_items;
+declare allowed_steps text[];
+begin
+  if (select auth.uid()) is null then raise exception 'Authentication required'; end if;
+  select * into item from public.content_items where id = p_item_id for update;
+  if item.id is null then raise exception 'Content item not found'; end if;
+  if not ((select private.has_role('admin')) or (select private.is_assigned(item.id, 'responsible', item.current_stage))) then raise exception 'Not authorized to update this checkpoint'; end if;
+  allowed_steps := case item.current_stage
+    when 'idea' then array['Topic research', 'HOD input', 'Calendar slot']
+    when 'script' then array['Drafting', 'Subject-matter validation', 'Financial compliance']
+    when 'shoot' then array['Shoot brief', 'Recording']
+    when 'production' then array['Edit or design', 'Harshit quality check', 'Priya final approval']
+    when 'upload' then array['Platform scheduling', 'Publishing']
+    else array['Engagement monitoring', 'Lead follow-up', 'Weekly or monthly reporting']
+  end;
+  if not (p_workflow_step = any(allowed_steps)) then raise exception 'Checkpoint does not belong to the current stage'; end if;
+  update public.content_items set workflow_step = p_workflow_step where id = item.id returning * into item;
+  insert into public.stage_history (content_item_id, from_stage, to_stage, action, actor_id, note)
+  values (item.id, item.current_stage, item.current_stage, 'edited', (select auth.uid()), 'Checkpoint moved to ' || p_workflow_step);
+  return item;
+end;
+$$;
+
 revoke all on function public.submit_current_stage(uuid) from public, anon;
 revoke all on function public.advance_content_item(uuid, timestamptz, text) from public, anon;
 revoke all on function public.request_stage_changes(uuid, text) from public, anon;
 revoke all on function public.enqueue_due_date_reminders() from public, anon;
 revoke all on function public.update_content_item_metadata(uuid, text, text, text, timestamptz, smallint) from public, anon;
+revoke all on function public.update_workflow_step(uuid, text) from public, anon;
 grant execute on function public.submit_current_stage(uuid) to authenticated;
 grant execute on function public.advance_content_item(uuid, timestamptz, text) to authenticated;
 grant execute on function public.request_stage_changes(uuid, text) to authenticated;
 grant execute on function public.update_content_item_metadata(uuid, text, text, text, timestamptz, smallint) to authenticated;
+grant execute on function public.update_workflow_step(uuid, text) to authenticated;
 grant execute on function public.enqueue_due_date_reminders() to service_role;
 
 alter table public.profiles enable row level security;
@@ -437,15 +516,20 @@ alter table public.stage_reviews enable row level security;
 alter table public.stage_history enable row level security;
 alter table public.comments enable row level security;
 alter table public.metrics_entries enable row level security;
+alter table public.leads enable row level security;
+alter table public.engagement_inbox enable row level security;
+alter table public.department_requests enable row level security;
 alter table public.notifications enable row level security;
 alter table public.email_outbox enable row level security;
 alter table public.app_settings enable row level security;
 
 revoke all on all tables in schema public from anon, authenticated;
-grant select on public.profiles, public.user_roles, public.content_items, public.item_stage_assignments, public.content_links, public.stage_reviews, public.stage_history, public.comments, public.metrics_entries, public.notifications, public.app_settings to authenticated;
+grant select on public.profiles, public.user_roles, public.content_items, public.item_stage_assignments, public.content_links, public.stage_reviews, public.stage_history, public.comments, public.metrics_entries, public.leads, public.engagement_inbox, public.department_requests, public.notifications, public.app_settings to authenticated;
 grant insert on public.content_items to authenticated;
 grant insert, update, delete on public.item_stage_assignments, public.content_links to authenticated;
 grant insert, update on public.stage_reviews, public.comments, public.metrics_entries to authenticated;
+grant update on public.leads, public.engagement_inbox to authenticated;
+grant insert, update on public.department_requests to authenticated;
 grant update on public.notifications to authenticated;
 grant select, insert, update, delete on public.profiles, public.user_roles, public.app_settings to authenticated;
 grant usage, select on all sequences in schema public to authenticated;
@@ -483,6 +567,14 @@ create policy comments_update on public.comments for update to authenticated usi
 create policy metrics_read on public.metrics_entries for select to authenticated using ((select private.can_view_item(content_item_id)));
 create policy metrics_create on public.metrics_entries for insert to authenticated with check (recorded_by = (select auth.uid()) and ((select private.has_role('monitoring')) or (select private.has_role('admin'))));
 create policy metrics_update on public.metrics_entries for update to authenticated using ((select private.has_role('monitoring')) or (select private.has_role('admin'))) with check ((select private.has_role('monitoring')) or (select private.has_role('admin')));
+
+create policy leads_read on public.leads for select to authenticated using ((select private.current_user_active()) and ((select private.has_role('monitoring')) or (select private.has_role('admin'))));
+create policy leads_update on public.leads for update to authenticated using ((select private.has_role('monitoring')) or (select private.has_role('admin'))) with check ((select private.has_role('monitoring')) or (select private.has_role('admin')));
+create policy engagement_read on public.engagement_inbox for select to authenticated using ((select private.current_user_active()) and ((select private.has_role('monitoring')) or (select private.has_role('admin'))));
+create policy engagement_update on public.engagement_inbox for update to authenticated using ((select private.has_role('monitoring')) or (select private.has_role('admin'))) with check ((select private.has_role('monitoring')) or (select private.has_role('admin')));
+create policy requests_read on public.department_requests for select to authenticated using ((select private.current_user_active()));
+create policy requests_create on public.department_requests for insert to authenticated with check (created_by = (select auth.uid()) and ((select private.has_role('content_producer')) or (select private.has_role('admin'))));
+create policy requests_update on public.department_requests for update to authenticated using ((select private.has_role('admin'))) with check ((select private.has_role('admin')));
 
 create policy notifications_own_read on public.notifications for select to authenticated using (recipient_id = (select auth.uid()));
 create policy notifications_own_update on public.notifications for update to authenticated using (recipient_id = (select auth.uid())) with check (recipient_id = (select auth.uid()));

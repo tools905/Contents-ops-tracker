@@ -4,9 +4,6 @@ import type {
   ContentItem,
   ContentPillar,
   DepartmentRequest,
-  InboxItem,
-  Lead,
-  LeadStatus,
   Person,
   Stage,
   StageStatus,
@@ -38,13 +35,6 @@ const pillarFromDb: Record<string, ContentPillar> = {
   promotional: 'Promotional',
   aafm_india_insider: 'AAFM India Insider',
 };
-const leadStatusFromDb: Record<string, LeadStatus> = {
-  new: 'New',
-  qualified: 'Qualified',
-  follow_up_due: 'Follow-up due',
-  converted: 'Converted',
-};
-
 function initials(name: string) {
   return name
     .split(/\s+/)
@@ -59,8 +49,6 @@ export type LiveSnapshot = {
   currentUserActive: boolean;
   people: Person[];
   items: ContentItem[];
-  leads: Lead[];
-  inbox: InboxItem[];
   requests: DepartmentRequest[];
 };
 
@@ -79,8 +67,6 @@ export async function loadLiveSnapshot(
     historyRes,
     commentsRes,
     metricsRes,
-    leadsRes,
-    inboxRes,
     requestsRes,
   ] = await Promise.all([
     client.from('profiles').select('id,email,full_name,is_active'),
@@ -108,11 +94,6 @@ export async function loadLiveSnapshot(
       .from('metrics_entries')
       .select('*')
       .order('recorded_on', { ascending: false }),
-    client.from('leads').select('*').order('created_at', { ascending: false }),
-    client
-      .from('engagement_inbox')
-      .select('*')
-      .order('created_at', { ascending: false }),
     client
       .from('department_requests')
       .select('*')
@@ -129,8 +110,6 @@ export async function loadLiveSnapshot(
     historyRes,
     commentsRes,
     metricsRes,
-    leadsRes,
-    inboxRes,
     requestsRes,
   ].find((result) => result.error)?.error;
   if (error) throw error;
@@ -235,10 +214,18 @@ export async function loadLiveSnapshot(
         .map((metric) => ({
           id: String(metric.id),
           platform: metric.platform,
+          contentUrl: metric.content_url ?? undefined,
           views: metric.views,
+          reach: metric.reach,
+          impressions: metric.impressions,
           likes: metric.likes,
           comments: metric.comments,
           shares: metric.shares,
+          saves: metric.saves,
+          watchTimeMinutes: Math.round((metric.watch_time_seconds ?? 0) / 60),
+          followerChange: metric.follower_change,
+          notes: metric.notes ?? undefined,
+          source: metric.source === 'zoho_analytics' ? 'Zoho Analytics' : 'Manual',
           recordedOn: metric.recorded_on,
         })),
     } as ContentItem;
@@ -252,40 +239,6 @@ export async function loadLiveSnapshot(
     initials: 'U',
     roles: [],
   };
-  const leads: Lead[] = (leadsRes.data ?? []).map((row) => ({
-    id: row.id,
-    name: row.full_name,
-    source: row.source,
-    interest: row.interest,
-    owner: row.routed_department,
-    status: leadStatusFromDb[row.status] ?? 'New',
-    capturedAt: new Date(row.created_at).toLocaleString('en-IN', {
-      timeZone: 'Asia/Kolkata',
-      dateStyle: 'medium',
-      timeStyle: 'short',
-    }),
-    nextFollowUp: row.next_follow_up_at
-      ? new Date(row.next_follow_up_at).toLocaleString('en-IN', {
-          timeZone: 'Asia/Kolkata',
-          dateStyle: 'medium',
-          timeStyle: 'short',
-        })
-      : undefined,
-  }));
-  const inbox: InboxItem[] = (inboxRes.data ?? []).map((row) => ({
-    id: row.id,
-    person: row.person_name,
-    channel: row.channel,
-    message: row.message,
-    detectedKeyword: row.detected_keyword ?? undefined,
-    sensitive: row.is_sensitive,
-    status:
-      row.status === 'needs_reply'
-        ? 'Needs reply'
-        : row.status === 'auto_response_sent'
-          ? 'Auto-response sent'
-          : 'Resolved',
-  }));
   const requests: DepartmentRequest[] = (requestsRes.data ?? []).map((row) => ({
     id: row.id,
     department: row.department,
@@ -308,8 +261,6 @@ export async function loadLiveSnapshot(
     currentUserActive: Boolean(profile?.is_active),
     people,
     items,
-    leads,
-    inbox,
     requests,
   };
 }

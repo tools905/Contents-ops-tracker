@@ -6,6 +6,7 @@ import {
   useEffect,
   useMemo,
   useState,
+  type ReactNode,
   type SyntheticEvent,
 } from 'react';
 import type { SupabaseClient, User } from '@supabase/supabase-js';
@@ -24,17 +25,19 @@ import {
   FileCheck2,
   FileText,
   GripVertical,
-  Inbox,
   LayoutDashboard,
   Link2,
   LogOut,
   MessageSquareText,
+  Monitor,
+  Moon,
   Plus,
   RefreshCw,
   Send,
   Settings2,
   ShieldCheck,
   Sparkles,
+  Sun,
   UploadCloud,
   UserRound,
   Users2,
@@ -101,23 +104,16 @@ import {
   TableRow,
 } from '@/components/ui/table';
 import { Textarea } from '@/components/ui/textarea';
-import {
-  demoInbox,
-  demoItems,
-  demoLeads,
-  demoPeople,
-  demoRequests,
-} from '@/lib/demo-data';
+import { demoItems, demoPeople, demoRequests } from '@/lib/demo-data';
 import {
   PIPELINE,
+  PLATFORM_CONTENT_TYPES,
   STAGE_STEPS,
   type AppRole,
   type ContentItem,
   type ContentPillar,
   type DepartmentRequest,
-  type InboxItem,
-  type Lead,
-  type LeadStatus,
+  type MetricEntry,
   type Person,
   type Stage,
 } from '@/lib/content-types';
@@ -128,12 +124,12 @@ type View =
   | 'today'
   | 'pipeline'
   | 'calendar'
-  | 'engagement'
   | 'reports'
   | 'requests'
   | 'people'
   | 'settings';
 type MoveIntent = { item: ContentItem; toStage: Stage };
+type MetricDraft = Omit<MetricEntry, 'id' | 'source'>;
 const ROLE_PERSON: Record<AppRole, string> = {
   Owner: 'p1',
   Admin: 'p2',
@@ -168,7 +164,6 @@ const nav: Array<{ view: View; label: string; icon: typeof LayoutDashboard }> =
     { view: 'today', label: 'Today', icon: LayoutDashboard },
     { view: 'pipeline', label: 'Content pipeline', icon: FileText },
     { view: 'calendar', label: 'Calendar', icon: CalendarDays },
-    { view: 'engagement', label: 'Engagement & leads', icon: Inbox },
     { view: 'reports', label: 'Reports', icon: BarChart3 },
     { view: 'requests', label: 'Content requests', icon: MessageSquareText },
     { view: 'people', label: 'People & access', icon: Users2 },
@@ -190,14 +185,14 @@ export default function ContentOpsApp({
   const [activeProfile, setActiveProfile] = useState(demoMode);
   const [people, setPeople] = useState<Person[]>(demoPeople);
   const [items, setItems] = useState<ContentItem[]>(demoItems);
-  const [leads, setLeads] = useState<Lead[]>(demoLeads);
-  const [inbox, setInbox] = useState<InboxItem[]>(demoInbox);
   const [requests, setRequests] = useState<DepartmentRequest[]>(demoRequests);
   const [currentUser, setCurrentUser] = useState<Person>(demoPeople[0]);
   const [currentRole, setCurrentRole] = useState<AppRole>('Owner');
   const [view, setView] = useState<View>('today');
   const [selectedId, setSelectedId] = useState<string>();
   const [createOpen, setCreateOpen] = useState(false);
+  const [metricsOpen, setMetricsOpen] = useState(false);
+  const [theme, setTheme] = useState<'light' | 'dark' | 'system'>('system');
   const [overrideItem, setOverrideItem] = useState<ContentItem>();
   const [moveIntent, setMoveIntent] = useState<MoveIntent>();
   const [notice, setNotice] = useState('');
@@ -208,8 +203,6 @@ export default function ContentOpsApp({
       const snapshot = await loadLiveSnapshot(supabase, user);
       setPeople(snapshot.people);
       setItems(snapshot.items);
-      setLeads(snapshot.leads);
-      setInbox(snapshot.inbox);
       setRequests(snapshot.requests);
       setCurrentUser(snapshot.currentUser);
       setActiveProfile(snapshot.currentUserActive);
@@ -218,6 +211,25 @@ export default function ContentOpsApp({
     },
     [],
   );
+
+  useEffect(() => {
+    const stored = window.localStorage.getItem('aafm-theme');
+    if (stored === 'light' || stored === 'dark' || stored === 'system')
+      setTheme(stored);
+  }, []);
+
+  useEffect(() => {
+    const media = window.matchMedia('(prefers-color-scheme: dark)');
+    const applyTheme = () => {
+      const dark = theme === 'dark' || (theme === 'system' && media.matches);
+      document.documentElement.classList.toggle('dark', dark);
+      document.documentElement.style.colorScheme = dark ? 'dark' : 'light';
+    };
+    applyTheme();
+    window.localStorage.setItem('aafm-theme', theme);
+    media.addEventListener('change', applyTheme);
+    return () => media.removeEventListener('change', applyTheme);
+  }, [theme]);
 
   useEffect(() => {
     if (!client) return;
@@ -280,11 +292,6 @@ export default function ContentOpsApp({
       (entry) =>
         entry.view !== 'settings' ||
         hasAnyRole(effectiveRoles, ['Owner', 'Admin']),
-    )
-    .filter(
-      (entry) =>
-        entry.view !== 'engagement' ||
-        hasAnyRole(effectiveRoles, ['Owner', 'Admin', 'Monitoring']),
     );
   const showNotice = (message: string) => {
     setNotice(message);
@@ -622,7 +629,7 @@ export default function ContentOpsApp({
 
   const addMetric = async (
     item: ContentItem,
-    values: { views: number; likes: number; comments: number; shares: number },
+    values: MetricDraft,
   ) => {
     if (!demoMode)
       return mutateLive(async (supabase) => {
@@ -631,9 +638,19 @@ export default function ContentOpsApp({
           .upsert(
             {
               content_item_id: item.id,
-              platform: item.platform,
-              ...values,
-              recorded_on: new Date().toISOString().slice(0, 10),
+              platform: values.platform,
+              content_url: values.contentUrl || null,
+              views: values.views,
+              reach: values.reach,
+              impressions: values.impressions,
+              likes: values.likes,
+              comments: values.comments,
+              shares: values.shares,
+              saves: values.saves,
+              watch_time_seconds: values.watchTimeMinutes * 60,
+              follower_change: values.followerChange,
+              notes: values.notes || null,
+              recorded_on: values.recordedOn,
               recorded_by: authUser!.id,
               source: 'manual',
             },
@@ -649,9 +666,8 @@ export default function ContentOpsApp({
               metrics: [
                 {
                   id: crypto.randomUUID(),
-                  platform: item.platform,
                   ...values,
-                  recordedOn: new Date().toISOString().slice(0, 10),
+                  source: 'Manual',
                 },
                 ...row.metrics,
               ],
@@ -744,52 +760,6 @@ export default function ContentOpsApp({
     ]);
     setCreateOpen(false);
     showNotice('Content item created.');
-  };
-
-  const updateLead = async (id: string, status: LeadStatus) => {
-    if (!demoMode)
-      return mutateLive(async (supabase) => {
-        const { error } = await supabase
-          .from('leads')
-          .update({
-            status:
-              status === 'Follow-up due'
-                ? 'follow_up_due'
-                : status.toLowerCase(),
-          })
-          .eq('id', id);
-        if (error) throw error;
-      }, 'Lead stage updated.');
-    setLeads((all) =>
-      all.map((lead) => (lead.id === id ? { ...lead, status } : lead)),
-    );
-    showNotice('Lead stage updated.');
-  };
-
-  const updateInbox = async (id: string, status: InboxItem['status']) => {
-    if (!demoMode)
-      return mutateLive(
-        async (supabase) => {
-          const value =
-            status === 'Needs reply'
-              ? 'needs_reply'
-              : status === 'Auto-response sent'
-                ? 'auto_response_sent'
-                : 'resolved';
-          const { error } = await supabase
-            .from('engagement_inbox')
-            .update({ status: value })
-            .eq('id', id);
-          if (error) throw error;
-        },
-        status === 'Resolved' ? 'Conversation resolved.' : 'Inbox updated.',
-      );
-    setInbox((all) =>
-      all.map((entry) => (entry.id === id ? { ...entry, status } : entry)),
-    );
-    showNotice(
-      status === 'Resolved' ? 'Conversation resolved.' : 'Inbox updated.',
-    );
   };
 
   const addRequest = async (
@@ -948,12 +918,12 @@ export default function ContentOpsApp({
                     <SidebarMenuButton
                       isActive={view === target}
                       onClick={() => setView(target)}
-                      className="h-10 text-[14px] text-white/70 hover:bg-white/10 hover:text-white data-active:bg-white/12 data-active:text-white"
+                      className="h-10 text-[14px] text-white/70 hover:bg-card/10 hover:text-white data-active:bg-card/12 data-active:text-white"
                     >
                       <Icon />
                       <span>{label}</span>
                       {target === 'today' && myActions.length > 0 && (
-                        <Badge className="ml-auto bg-[#dfa126] text-[#1f2342]">
+                        <Badge className="ml-auto bg-[#dfa126] text-card-foreground">
                           {myActions.length}
                         </Badge>
                       )}
@@ -965,7 +935,7 @@ export default function ContentOpsApp({
           </SidebarGroup>
         </SidebarContent>
         <SidebarFooter className="p-4">
-          <div className="rounded-xl border border-white/10 bg-white/6 p-3">
+          <div className="rounded-xl border border-white/10 bg-card/6 p-3">
             <div className="flex items-center gap-2.5">
               <Avatar person={rolePerson} />
               <div className="min-w-0">
@@ -981,8 +951,8 @@ export default function ContentOpsApp({
           </div>
         </SidebarFooter>
       </Sidebar>
-      <SidebarInset className="min-w-0 bg-[#f4f1ea]">
-        <header className="sticky top-0 z-20 flex min-h-16 items-center justify-between gap-3 border-b border-[#1f2342]/8 bg-[#f4f1ea]/92 px-4 py-2 backdrop-blur-md sm:px-7 lg:px-10">
+      <SidebarInset className="min-w-0 bg-background">
+        <header className="sticky top-0 z-20 flex min-h-16 items-center justify-between gap-3 border-b border-border bg-background/92 px-4 py-2 backdrop-blur-md sm:px-7 lg:px-10">
           <div className="flex min-w-0 items-center gap-3">
             <SidebarTrigger className="md:hidden" />
             <Image
@@ -992,11 +962,11 @@ export default function ContentOpsApp({
               height={594}
               className="hidden h-8 w-auto sm:block"
             />
-            <div className="hidden border-l border-[#1f2342]/12 pl-3 lg:block">
+            <div className="hidden border-l border-border pl-3 lg:block">
               <p className="text-xs font-semibold uppercase tracking-[0.14em] text-[#7a5200]">
                 Content operations
               </p>
-              <p className="text-sm text-[#525570]">Asia/Kolkata</p>
+              <p className="text-sm text-muted-foreground">Asia/Kolkata</p>
             </div>
           </div>
           <div className="flex items-center gap-2">
@@ -1013,7 +983,7 @@ export default function ContentOpsApp({
                   );
                   setView('today');
                 }}
-                className="max-w-[190px] bg-white"
+                className="max-w-[190px] bg-card"
               >
                 <NativeSelectOption>Owner</NativeSelectOption>
                 <NativeSelectOption>Admin</NativeSelectOption>
@@ -1023,6 +993,50 @@ export default function ContentOpsApp({
                 <NativeSelectOption>Read-only Stakeholder</NativeSelectOption>
               </NativeSelect>
             )}
+            <div className="relative hidden sm:block">
+              {theme === 'dark' ? (
+                <Moon className="pointer-events-none absolute left-2.5 top-1/2 z-10 size-4 -translate-y-1/2 text-muted-foreground" />
+              ) : theme === 'light' ? (
+                <Sun className="pointer-events-none absolute left-2.5 top-1/2 z-10 size-4 -translate-y-1/2 text-muted-foreground" />
+              ) : (
+                <Monitor className="pointer-events-none absolute left-2.5 top-1/2 z-10 size-4 -translate-y-1/2 text-muted-foreground" />
+              )}
+              <NativeSelect
+                aria-label="Theme"
+                value={theme}
+                onChange={(event) =>
+                  setTheme(event.target.value as 'light' | 'dark' | 'system')
+                }
+                className="w-[116px] bg-card pl-8"
+              >
+                <NativeSelectOption value="system">System</NativeSelectOption>
+                <NativeSelectOption value="light">Light</NativeSelectOption>
+                <NativeSelectOption value="dark">Dark</NativeSelectOption>
+              </NativeSelect>
+            </div>
+            <Button
+              variant="outline"
+              size="icon"
+              className="sm:hidden"
+              aria-label={`Theme: ${theme}. Change theme`}
+              onClick={() =>
+                setTheme(
+                  theme === 'system'
+                    ? 'light'
+                    : theme === 'light'
+                      ? 'dark'
+                      : 'system',
+                )
+              }
+            >
+              {theme === 'dark' ? (
+                <Moon />
+              ) : theme === 'light' ? (
+                <Sun />
+              ) : (
+                <Monitor />
+              )}
+            </Button>
             <Button variant="outline" size="icon" aria-label="Notifications" onClick={() => showNotice(myActions.length ? `${myActions.length} action${myActions.length === 1 ? '' : 's'} need your attention.` : 'You are all caught up.')}>
               <Bell />
             </Button>
@@ -1056,8 +1070,7 @@ export default function ContentOpsApp({
             <Today
               items={visibleItems}
               actions={myActions}
-              inbox={inbox}
-              leads={leads}
+              roles={effectiveRoles}
               onOpen={(id) => setSelectedId(id)}
               onReview={secondLensReview}
               onSaveMetric={addMetric}
@@ -1079,18 +1092,15 @@ export default function ContentOpsApp({
               onOpen={(id) => setSelectedId(id)}
             />
           )}
-          {view === 'engagement' && (
-            <EngagementAndLeads
-              inbox={inbox}
-              leads={leads}
-              onInboxUpdate={updateInbox}
-              onLeadUpdate={updateLead}
-            />
-          )}
           {view === 'reports' && (
             <Reports
               items={visibleItems}
-              leads={leads}
+              canAdd={hasAnyRole(effectiveRoles, [
+                'Owner',
+                'Admin',
+                'Monitoring',
+              ])}
+              onAdd={() => setMetricsOpen(true)}
               onOpen={(id) => setSelectedId(id)}
             />
           )}
@@ -1116,6 +1126,12 @@ export default function ContentOpsApp({
         onOpenChange={setCreateOpen}
         people={people}
         onCreate={createItem}
+      />
+      <MetricsDialog
+        open={metricsOpen}
+        onOpenChange={setMetricsOpen}
+        items={visibleItems.filter((item) => Boolean(item.publishedAt))}
+        onSave={addMetric}
       />
       <ItemDetail
         open={Boolean(selected)}
@@ -1147,6 +1163,18 @@ export default function ContentOpsApp({
 
 function hasAnyRole(roles: AppRole[], expected: AppRole[]) {
   return expected.some((role) => roles.includes(role));
+}
+
+function dashboardScope(roles: AppRole[]) {
+  if (hasAnyRole(roles, ['Owner', 'Admin']))
+    return 'You can see the full content portfolio, every approval, and all performance snapshots. Only Owners can change email access and roles.';
+  if (roles.includes('Monitoring'))
+    return 'You see published content and can add or update manual performance snapshots for reporting.';
+  if (roles.includes('Content Approver'))
+    return 'You see content awaiting your review, its handoff history, and the performance of work you approved.';
+  if (roles.includes('Content Producer'))
+    return 'You see the content assigned to you, its deadlines, approvals, and post-publish results.';
+  return 'You have a read-only view of approved portfolio progress and aggregate performance.';
 }
 function isAssigned(
   item: ContentItem,
@@ -1276,7 +1304,7 @@ function stagePercent(stage: Stage) {
 }
 function LogoMonogram() {
   return (
-    <div className="relative size-11 shrink-0 overflow-hidden rounded-md bg-white shadow-sm">
+    <div className="relative size-11 shrink-0 overflow-hidden rounded-md bg-card shadow-sm">
       <Image
         src="/aafm-india-logo.png"
         alt=""
@@ -1289,7 +1317,7 @@ function LogoMonogram() {
 }
 function Avatar({ person }: { person: Person }) {
   return (
-    <div className="grid size-8 shrink-0 place-items-center rounded-full bg-[#dfa126] text-[11px] font-bold text-[#1f2342]">
+    <div className="grid size-8 shrink-0 place-items-center rounded-full bg-[#dfa126] text-[11px] font-bold text-card-foreground">
       {person.initials}
     </div>
   );
@@ -1301,7 +1329,7 @@ function Owners({ people }: { people: Person[] }) {
         <div
           key={person.id}
           title={person.name}
-          className="grid size-7 place-items-center rounded-full border-2 border-white bg-[#eceef7] text-[10px] font-bold text-[#1f2342]"
+          className="grid size-7 place-items-center rounded-full border-2 border-white bg-[#eceef7] text-[10px] font-bold text-card-foreground"
         >
           {person.initials}
         </div>
@@ -1320,7 +1348,7 @@ function StatusBadge({ item }: { item: ContentItem }) {
       ? 'bg-[#f7efdd] text-[#7a5200]'
       : item.status === 'Changes requested'
         ? 'bg-[#fff0e8] text-[#b34726]'
-        : 'bg-[#eceef7] text-[#1f2342]';
+        : 'bg-[#eceef7] text-card-foreground';
   return <Badge className={cls}>{item.status}</Badge>;
 }
 function PillarBadge({ pillar }: { pillar: ContentPillar }) {
@@ -1336,18 +1364,25 @@ function PageTitle({
   eyebrow,
   title,
   description,
+  action,
 }: {
   eyebrow: string;
   title: string;
   description: string;
+  action?: ReactNode;
 }) {
   return (
-    <div className="mb-7">
-      <p className="mb-2 text-sm font-semibold text-[#b27708]">{eyebrow}</p>
-      <h1 className="font-display text-3xl font-semibold tracking-[-0.03em] text-[#1f2342] sm:text-4xl">
-        {title}
-      </h1>
-      <p className="mt-2 max-w-2xl text-base text-[#6b7280]">{description}</p>
+    <div className="mb-7 flex flex-col justify-between gap-4 sm:flex-row sm:items-end">
+      <div>
+        <p className="mb-2 text-sm font-semibold text-[#b27708]">{eyebrow}</p>
+        <h1 className="font-display text-3xl font-semibold tracking-[-0.03em] text-card-foreground sm:text-4xl">
+          {title}
+        </h1>
+        <p className="mt-2 max-w-2xl text-base text-muted-foreground">
+          {description}
+        </p>
+      </div>
+      {action}
     </div>
   );
 }
@@ -1369,17 +1404,17 @@ function MetricCard({
 }) {
   return (
     <Card
-      className={`border-0 shadow-[0_10px_30px_rgba(31,35,66,0.045)] ring-1 ring-[#1f2342]/8 ${accent ? 'bg-[#1f2342] text-white' : 'bg-white'}`}
+      className={`border-0 shadow-[0_10px_30px_rgba(31,35,66,0.045)] ring-1 ring-border ${accent ? 'bg-[#1f2342] text-white' : 'bg-card'}`}
     >
       <CardHeader>
         <CardDescription
-          className={accent ? 'text-white/55' : 'text-[#6b7280]'}
+          className={accent ? 'text-white/55' : 'text-muted-foreground'}
         >
           {label}
         </CardDescription>
         <CardAction>
           <div
-            className={`grid size-9 place-items-center rounded-lg ${warning ? 'bg-[#fff0e8] text-[#b34726]' : accent ? 'bg-white/10 text-[#f0c254]' : 'bg-[#f7efdd] text-[#9a6908]'}`}
+            className={`grid size-9 place-items-center rounded-lg ${warning ? 'bg-[#fff0e8] text-[#b34726]' : accent ? 'bg-card/10 text-[#f0c254]' : 'bg-[#f7efdd] text-[#9a6908]'}`}
           >
             <Icon className="size-4" />
           </div>
@@ -1387,12 +1422,12 @@ function MetricCard({
       </CardHeader>
       <CardContent>
         <p
-          className={`font-display text-3xl font-semibold ${accent ? 'text-white' : 'text-[#1f2342]'}`}
+          className={`font-display text-3xl font-semibold ${accent ? 'text-white' : 'text-card-foreground'}`}
         >
           {value}
         </p>
         <p
-          className={`mt-2 text-xs ${accent ? 'text-white/45' : warning ? 'text-[#b34726]' : 'text-[#8b8e9e]'}`}
+          className={`mt-2 text-xs ${accent ? 'text-white/45' : warning ? 'text-[#b34726]' : 'text-muted-foreground'}`}
         >
           {detail}
         </p>
@@ -1404,8 +1439,7 @@ function MetricCard({
 function Today({
   items,
   actions,
-  inbox,
-  leads,
+  roles,
   onOpen,
   onReview,
   onSaveMetric,
@@ -1413,13 +1447,12 @@ function Today({
 }: {
   items: ContentItem[];
   actions: ActionItem[];
-  inbox: InboxItem[];
-  leads: Lead[];
+  roles: AppRole[];
   onOpen: (id: string) => void;
   onReview: (item: ContentItem, approved: boolean, note: string) => void;
   onSaveMetric: (
     item: ContentItem,
-    values: { views: number; likes: number; comments: number; shares: number },
+    values: MetricDraft,
   ) => void;
   setView: (view: View) => void;
 }) {
@@ -1461,17 +1494,15 @@ function Today({
           warning
         />
         <MetricCard
-          label="Lead follow-ups"
-          value={String(
-            leads.filter((lead) => lead.status === 'Follow-up due').length,
-          )}
-          detail="Owned by the receiving team"
-          icon={Users2}
+          label="Visible content"
+          value={String(items.length)}
+          detail="Filtered for your role and assignments"
+          icon={CircleGauge}
         />
       </section>
       <section className="mt-6 grid gap-5 xl:grid-cols-[minmax(0,1.45fr)_minmax(320px,.75fr)]">
         <div className="space-y-5">
-          <Card className="bg-white">
+          <Card className="bg-card">
             <CardHeader>
               <CardTitle>Approval queue</CardTitle>
               <CardDescription>
@@ -1503,7 +1534,7 @@ function Today({
               )}
             </CardContent>
           </Card>
-          <Card className="bg-white">
+          <Card className="bg-card">
             <CardHeader>
               <CardTitle>Your production work</CardTitle>
               <CardDescription>
@@ -1526,7 +1557,7 @@ function Today({
             </CardContent>
           </Card>
           {metrics.length > 0 && (
-            <Card className="bg-white">
+            <Card className="bg-card">
               <CardHeader>
                 <CardTitle>Metrics to record</CardTitle>
                 <CardDescription>
@@ -1557,7 +1588,7 @@ function Today({
                 <Button
                   variant="ghost"
                   size="sm"
-                  className="text-white hover:bg-white/10 hover:text-white"
+                  className="text-white hover:bg-card/10 hover:text-white"
                   onClick={() => setView('pipeline')}
                 >
                   Open board <ChevronRight />
@@ -1574,7 +1605,7 @@ function Today({
                   <span className="w-32 truncate text-sm text-white/70">
                     {stage}
                   </span>
-                  <span className="h-1.5 flex-1 overflow-hidden rounded-full bg-white/10">
+                  <span className="h-1.5 flex-1 overflow-hidden rounded-full bg-card/10">
                     <span
                       className="block h-full rounded-full bg-[#eeaa2c]"
                       style={{
@@ -1589,44 +1620,20 @@ function Today({
               ))}
             </CardContent>
           </Card>
-          <Card className="bg-white">
+          <Card className="bg-card">
             <CardHeader>
-              <CardTitle>Community watch</CardTitle>
+              <CardTitle>Your dashboard scope</CardTitle>
               <CardDescription>
-                Comments and DMs that still need a human.
+                Based on your current access: {roles.join(' · ')}
               </CardDescription>
-              <CardAction>
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  onClick={() => setView('engagement')}
-                >
-                  Open inbox <ChevronRight />
-                </Button>
-              </CardAction>
             </CardHeader>
-            <CardContent className="space-y-3">
-              {inbox
-                .filter((entry) => entry.status === 'Needs reply')
-                .slice(0, 3)
-                .map((entry) => (
-                  <div
-                    key={entry.id}
-                    className="rounded-xl border border-[#1f2342]/8 p-3"
-                  >
-                    <div className="flex items-center justify-between gap-3">
-                      <p className="text-sm font-semibold">{entry.person}</p>
-                      {entry.sensitive && (
-                        <Badge className="bg-[#fff0e8] text-[#a23e22]">
-                          Human reply
-                        </Badge>
-                      )}
-                    </div>
-                    <p className="mt-1 line-clamp-2 text-sm text-[#6b7280]">
-                      {entry.message}
-                    </p>
-                  </div>
-                ))}
+            <CardContent className="space-y-3 text-sm text-muted-foreground">
+              <div className="rounded-xl border bg-muted/60 p-3">
+                {dashboardScope(roles)}
+              </div>
+              <Button variant="outline" onClick={() => setView('reports')}>
+                Open your reports <ChevronRight />
+              </Button>
             </CardContent>
           </Card>
         </div>
@@ -1647,29 +1654,29 @@ function ActionRow({
   return (
     <button
       onClick={() => onOpen(item.id)}
-      className="flex w-full items-center justify-between gap-4 rounded-xl border border-[#1f2342]/9 p-3.5 text-left transition hover:border-[#dfa126]/60 hover:bg-[#fbfaf6]"
+      className="flex w-full items-center justify-between gap-4 rounded-xl border border-border p-3.5 text-left transition hover:border-[#dfa126]/60 hover:bg-muted"
     >
       <div className="min-w-0">
         <div className="mb-1.5 flex flex-wrap gap-2">
           <Badge className="bg-[#f7efdd] text-[#74500a]">{label}</Badge>
           {isOverdue(item) && <Badge variant="destructive">Overdue</Badge>}
         </div>
-        <p className="truncate text-sm font-semibold text-[#1f2342]">
+        <p className="truncate text-sm font-semibold text-card-foreground">
           {item.title}
         </p>
-        <p className="mt-1 text-xs text-[#707487]">
+        <p className="mt-1 text-xs text-muted-foreground">
           {item.stage} · {item.workflowStep} · {dueLabel(item)}
         </p>
       </div>
-      <ChevronRight className="size-4 shrink-0 text-[#9296a5]" />
+      <ChevronRight className="size-4 shrink-0 text-muted-foreground" />
     </button>
   );
 }
 function EmptyState({ text }: { text: string }) {
   return (
-    <div className="grid place-items-center rounded-xl border border-dashed border-[#1f2342]/15 py-8 text-center">
+    <div className="grid place-items-center rounded-xl border border-dashed border-border py-8 text-center">
       <CheckCircle2 className="mb-2 size-6 text-[#3b9171]" />
-      <p className="text-sm text-[#6b7280]">{text}</p>
+      <p className="text-sm text-muted-foreground">{text}</p>
     </div>
   );
 }
@@ -1700,13 +1707,13 @@ function ItemTable({
             onClick={() => onOpen(item.id)}
           >
             <TableCell className="min-w-[250px]">
-              <p className="font-medium text-[#1f2342]">{item.title}</p>
-              <p className="mt-1 text-xs text-[#7b7f90]">{item.contentType}</p>
+              <p className="font-medium text-card-foreground">{item.title}</p>
+              <p className="mt-1 text-xs text-muted-foreground">{item.contentType}</p>
             </TableCell>
             <TableCell>
               <div className="space-y-2">
                 <StatusBadge item={item} />
-                <p className="text-xs text-[#7b7f90]">{item.stage}</p>
+                <p className="text-xs text-muted-foreground">{item.stage}</p>
               </div>
             </TableCell>
             <TableCell>
@@ -1716,7 +1723,7 @@ function ItemTable({
               className={
                 isOverdue(item)
                   ? 'font-medium text-[#b34726]'
-                  : 'text-[#525570]'
+                  : 'text-muted-foreground'
               }
             >
               {dueLabel(item)}
@@ -1742,12 +1749,12 @@ function Pipeline({
   onMove: (item: ContentItem, stage: Stage) => void;
 }) {
   const stageStyles = [
-    'border-t-[#77809b] bg-[#eef0f5]',
+    'border-t-[#77809b] bg-muted',
     'border-t-[#dfa126] bg-[#fbf2dc]',
     'border-t-[#4e91ad] bg-[#e9f3f6]',
     'border-t-[#8b70ab] bg-[#f1edf6]',
     'border-t-[#3b9171] bg-[#e9f4ef]',
-    'border-t-[#1f2342] bg-[#e9eaf0]',
+    'border-t-[#1f2342] bg-muted',
   ];
   return (
     <>
@@ -1757,7 +1764,7 @@ function Pipeline({
           title="Six headings. Every departmental checkpoint."
           description="Research, compliance, creative approvals, publishing and reporting stay visible inside the six stages your team already knows."
         />
-        <div className="mb-7 flex shrink-0 items-center gap-2 rounded-xl border border-[#1f2342]/10 bg-white px-3 py-2 text-sm text-[#525570]">
+        <div className="mb-7 flex shrink-0 items-center gap-2 rounded-xl border border-border bg-card px-3 py-2 text-sm text-muted-foreground">
           <GripVertical className="size-4 text-[#9a6908]" /> Dragging always
           asks for confirmation
         </div>
@@ -1781,21 +1788,21 @@ function Pipeline({
                   );
                   if (item) onMove(item, stage);
                 }}
-                className={`w-[286px] rounded-2xl border border-t-4 border-[#1f2342]/10 p-3 ${stageStyles[index]}`}
+                className={`w-[286px] rounded-2xl border border-t-4 border-border p-3 ${stageStyles[index]}`}
               >
                 <div className="mb-3 flex items-center justify-between px-1 py-1">
                   <div className="min-w-0">
                     <p className="text-xs font-semibold text-[#9b6908]">
                       0{index + 1}
                     </p>
-                    <h2 className="mt-0.5 text-base font-semibold text-[#1f2342]">
+                    <h2 className="mt-0.5 text-base font-semibold text-card-foreground">
                       {stage}
                     </h2>
-                    <p className="mt-1 max-w-[220px] text-[11px] leading-relaxed text-[#707487]">
+                    <p className="mt-1 max-w-[220px] text-[11px] leading-relaxed text-muted-foreground">
                       {STAGE_STEPS[stage].join(' · ')}
                     </p>
                   </div>
-                  <Badge className="bg-white text-[#1f2342] shadow-sm">
+                  <Badge className="bg-card text-card-foreground shadow-sm">
                     {rows.length}
                   </Badge>
                 </div>
@@ -1809,7 +1816,7 @@ function Pipeline({
                     return (
                       <article
                         key={item.id}
-                        className={`group rounded-xl border border-[#1f2342]/9 bg-white p-3.5 shadow-[0_5px_18px_rgba(31,35,66,0.07)] transition hover:-translate-y-0.5 hover:shadow-md ${movable && next ? 'cursor-grab active:cursor-grabbing' : ''}`}
+                        className={`group rounded-xl border border-border bg-card p-3.5 shadow-[0_5px_18px_rgba(31,35,66,0.07)] transition hover:-translate-y-0.5 hover:shadow-md ${movable && next ? 'cursor-grab active:cursor-grabbing' : ''}`}
                       >
                         <div className="flex items-start gap-2">
                           <button
@@ -1824,7 +1831,7 @@ function Pipeline({
                               );
                               event.dataTransfer.effectAllowed = 'move';
                             }}
-                            className="mt-0.5 shrink-0 cursor-grab text-[#a7a9b5] group-hover:text-[#6f7285] disabled:cursor-default"
+                            className="mt-0.5 shrink-0 cursor-grab text-muted-foreground group-hover:text-muted-foreground disabled:cursor-default"
                           >
                             <GripVertical className="size-4" />
                           </button>
@@ -1832,10 +1839,10 @@ function Pipeline({
                             onClick={() => onOpen(item.id)}
                             className="min-w-0 flex-1 text-left"
                           >
-                            <p className="text-sm font-semibold leading-snug text-[#1f2342]">
+                            <p className="text-sm font-semibold leading-snug text-card-foreground">
                               {item.title}
                             </p>
-                            <p className="mt-1 text-xs text-[#7b7f90]">
+                            <p className="mt-1 text-xs text-muted-foreground">
                               {item.contentType} · {item.platform}
                             </p>
                           </button>
@@ -1844,7 +1851,7 @@ function Pipeline({
                           <PillarBadge pillar={item.pillar} />
                           <StatusBadge item={item} />
                         </div>
-                        <div className="mt-3 rounded-lg bg-[#f7f6f1] px-2.5 py-2">
+                        <div className="mt-3 rounded-lg bg-muted px-2.5 py-2">
                           <p className="text-[10px] font-semibold uppercase tracking-wide text-[#8a6a25]">
                             Current checkpoint
                           </p>
@@ -1855,7 +1862,7 @@ function Pipeline({
                         <div className="mt-4 flex items-center justify-between gap-2">
                           <Owners people={item.accountable} />
                           <span
-                            className={`flex items-center gap-1 text-xs ${isOverdue(item) ? 'font-semibold text-[#b34726]' : 'text-[#6f7285]'}`}
+                            className={`flex items-center gap-1 text-xs ${isOverdue(item) ? 'font-semibold text-[#b34726]' : 'text-muted-foreground'}`}
                           >
                             <Clock3 className="size-3.5" />
                             {dueLabel(item)}
@@ -1867,7 +1874,7 @@ function Pipeline({
                             size="sm"
                             disabled={!movable}
                             onClick={() => onMove(item, next)}
-                            className="mt-3 w-full justify-between text-[#525570]"
+                            className="mt-3 w-full justify-between text-muted-foreground"
                           >
                             {item.status === 'Pending approval'
                               ? 'Review handoff'
@@ -1879,7 +1886,7 @@ function Pipeline({
                     );
                   })}
                   {!rows.length && (
-                    <div className="rounded-xl border border-dashed border-[#1f2342]/20 bg-white/45 px-3 py-10 text-center text-sm text-[#7b7f90]">
+                    <div className="rounded-xl border border-dashed border-border bg-card/45 px-3 py-10 text-center text-sm text-muted-foreground">
                       Drop the next item here
                     </div>
                   )}
@@ -1928,16 +1935,16 @@ function ContentCalendar({
           return (
             <div
               key={key}
-              className={`rounded-xl border p-3 ${index === 0 ? 'border-[#dfa126] bg-[#fff8e8]' : 'border-[#1f2342]/9 bg-white'}`}
+              className={`rounded-xl border p-3 ${index === 0 ? 'border-[#dfa126] bg-[#fff8e8]' : 'border-border bg-card'}`}
             >
-              <p className="text-xs font-medium text-[#777b8d]">
+              <p className="text-xs font-medium text-muted-foreground">
                 {new Intl.DateTimeFormat('en-IN', {
                   weekday: 'short',
                   timeZone: 'Asia/Kolkata',
                 }).format(date)}
               </p>
               <div className="mt-1 flex items-end justify-between">
-                <p className="font-display text-2xl font-semibold text-[#1f2342]">
+                <p className="font-display text-2xl font-semibold text-card-foreground">
                   {new Intl.DateTimeFormat('en-IN', {
                     day: 'numeric',
                     timeZone: 'Asia/Kolkata',
@@ -1947,7 +1954,7 @@ function ContentCalendar({
                   className={
                     count
                       ? 'bg-[#1f2342] text-white'
-                      : 'bg-[#f0f1f5] text-[#777b8d]'
+                      : 'bg-muted text-muted-foreground'
                   }
                 >
                   {count}
@@ -1957,7 +1964,7 @@ function ContentCalendar({
           );
         })}
       </div>
-      <Card className="bg-white">
+      <Card className="bg-card">
         <CardHeader>
           <CardTitle>Upcoming schedule</CardTitle>
           <CardDescription>
@@ -1988,8 +1995,8 @@ function ContentCalendar({
                     {dueLabel(item)}
                   </TableCell>
                   <TableCell className="min-w-64">
-                    <p className="font-medium text-[#1f2342]">{item.title}</p>
-                    <p className="mt-1 text-xs text-[#777b8d]">
+                    <p className="font-medium text-card-foreground">{item.title}</p>
+                    <p className="mt-1 text-xs text-muted-foreground">
                       {item.platform} · {item.contentType}
                     </p>
                   </TableCell>
@@ -1998,7 +2005,7 @@ function ContentCalendar({
                   </TableCell>
                   <TableCell className="min-w-44">
                     <p className="text-sm font-medium">{item.workflowStep}</p>
-                    <p className="mt-1 text-xs text-[#777b8d]">{item.stage}</p>
+                    <p className="mt-1 text-xs text-muted-foreground">{item.stage}</p>
                   </TableCell>
                   <TableCell>
                     <Owners people={item.responsible} />
@@ -2013,191 +2020,15 @@ function ContentCalendar({
   );
 }
 
-function EngagementAndLeads({
-  inbox,
-  leads,
-  onInboxUpdate,
-  onLeadUpdate,
-}: {
-  inbox: InboxItem[];
-  leads: Lead[];
-  onInboxUpdate: (id: string, status: InboxItem['status']) => void;
-  onLeadUpdate: (id: string, status: LeadStatus) => void;
-}) {
-  return (
-    <>
-      <PageTitle
-        eyebrow="ENGAGEMENT & LEADS"
-        title="Respond, route, follow up."
-        description="Automation handles known keywords and capture. Sensitive replies, ownership and conversion decisions remain human-controlled."
-      />
-      <Tabs defaultValue="inbox">
-        <TabsList>
-          <TabsTrigger value="inbox">
-            Inbox ({inbox.filter((item) => item.status !== 'Resolved').length})
-          </TabsTrigger>
-          <TabsTrigger value="leads">Leads ({leads.length})</TabsTrigger>
-        </TabsList>
-        <TabsContent value="inbox" className="pt-5">
-          <div className="grid gap-4 lg:grid-cols-2">
-            {inbox.map((item) => (
-              <Card
-                key={item.id}
-                className={`bg-white ${item.sensitive ? 'ring-1 ring-[#d77654]/45' : ''}`}
-              >
-                <CardHeader>
-                  <div>
-                    <div className="flex flex-wrap items-center gap-2">
-                      <CardTitle>{item.person}</CardTitle>
-                      <Badge variant="secondary">{item.channel}</Badge>
-                      {item.sensitive && (
-                        <Badge className="bg-[#fff0e8] text-[#a23e22]">
-                          Sensitive · human only
-                        </Badge>
-                      )}
-                    </div>
-                    <CardDescription className="mt-1">
-                      {item.detectedKeyword
-                        ? `Keyword detected: ${item.detectedKeyword}`
-                        : 'No automatic keyword match'}
-                    </CardDescription>
-                  </div>
-                </CardHeader>
-                <CardContent>
-                  <p className="rounded-xl bg-[#f6f4ee] p-4 text-sm leading-relaxed text-[#454a61]">
-                    {item.message}
-                  </p>
-                  <div className="mt-4 flex flex-wrap items-center justify-between gap-3">
-                    <StatusPill value={item.status} />
-                    <div className="flex gap-2">
-                      {item.status === 'Needs reply' && (
-                        <Button
-                          size="sm"
-                          onClick={() => onInboxUpdate(item.id, 'Resolved')}
-                        >
-                          Mark replied
-                        </Button>
-                      )}
-                      {item.status === 'Auto-response sent' && (
-                        <Button
-                          size="sm"
-                          variant="outline"
-                          onClick={() => onInboxUpdate(item.id, 'Resolved')}
-                        >
-                          Confirm resolved
-                        </Button>
-                      )}
-                      {item.status === 'Resolved' && (
-                        <Button
-                          size="sm"
-                          variant="ghost"
-                          onClick={() => onInboxUpdate(item.id, 'Needs reply')}
-                        >
-                          Reopen
-                        </Button>
-                      )}
-                    </div>
-                  </div>
-                </CardContent>
-              </Card>
-            ))}
-          </div>
-        </TabsContent>
-        <TabsContent value="leads" className="pt-5">
-          <Card className="bg-white">
-            <CardHeader>
-              <CardTitle>Lead routing</CardTitle>
-              <CardDescription>
-                Captured from comments and DMs, then owned by the relevant
-                department.
-              </CardDescription>
-            </CardHeader>
-            <CardContent className="overflow-x-auto px-0 sm:px-4">
-              <Table>
-                <TableHeader>
-                  <TableRow>
-                    <TableHead>Lead</TableHead>
-                    <TableHead>Interest</TableHead>
-                    <TableHead>Routed to</TableHead>
-                    <TableHead>Follow-up</TableHead>
-                    <TableHead>Status</TableHead>
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {leads.map((lead) => (
-                    <TableRow key={lead.id}>
-                      <TableCell className="min-w-44">
-                        <p className="font-medium">{lead.name}</p>
-                        <p className="mt-1 text-xs text-[#777b8d]">
-                          {lead.source} · {lead.capturedAt}
-                        </p>
-                      </TableCell>
-                      <TableCell>{lead.interest}</TableCell>
-                      <TableCell>{lead.owner}</TableCell>
-                      <TableCell
-                        className={
-                          lead.status === 'Follow-up due'
-                            ? 'font-semibold text-[#b34726]'
-                            : ''
-                        }
-                      >
-                        {lead.nextFollowUp ?? 'Complete'}
-                      </TableCell>
-                      <TableCell>
-                        <NativeSelect
-                          aria-label={`Status for ${lead.name}`}
-                          value={lead.status}
-                          onChange={(event) =>
-                            onLeadUpdate(
-                              lead.id,
-                              event.target.value as LeadStatus,
-                            )
-                          }
-                          className="min-w-36 bg-white"
-                        >
-                          {(
-                            [
-                              'New',
-                              'Qualified',
-                              'Follow-up due',
-                              'Converted',
-                            ] as LeadStatus[]
-                          ).map((status) => (
-                            <NativeSelectOption key={status}>
-                              {status}
-                            </NativeSelectOption>
-                          ))}
-                        </NativeSelect>
-                      </TableCell>
-                    </TableRow>
-                  ))}
-                </TableBody>
-              </Table>
-            </CardContent>
-          </Card>
-        </TabsContent>
-      </Tabs>
-    </>
-  );
-}
-
-function StatusPill({ value }: { value: InboxItem['status'] }) {
-  const cls =
-    value === 'Needs reply'
-      ? 'bg-[#fff0e8] text-[#a23e22]'
-      : value === 'Resolved'
-        ? 'bg-[#e8f5ef] text-[#287354]'
-        : 'bg-[#f7efdd] text-[#74500a]';
-  return <Badge className={cls}>{value}</Badge>;
-}
-
 function Reports({
   items,
-  leads,
+  canAdd,
+  onAdd,
   onOpen,
 }: {
   items: ContentItem[];
-  leads: Lead[];
+  canAdd: boolean;
+  onAdd: () => void;
   onOpen: (id: string) => void;
 }) {
   const targets: Array<{
@@ -2212,19 +2043,45 @@ function Reports({
   const total = Math.max(1, items.length);
   const metrics = items.flatMap((item) =>
     item.metrics.map((entry) => ({ item, entry })),
-  );
+  ).sort((a, b) => b.entry.recordedOn.localeCompare(a.entry.recordedOn));
   const views = metrics.reduce((sum, row) => sum + row.entry.views, 0);
+  const reach = metrics.reduce((sum, row) => sum + row.entry.reach, 0);
   const engagements = metrics.reduce(
-    (sum, row) => sum + row.entry.likes + row.entry.comments + row.entry.shares,
+    (sum, row) =>
+      sum +
+      row.entry.likes +
+      row.entry.comments +
+      row.entry.shares +
+      row.entry.saves,
+    0,
+  );
+  const engagementRate = reach ? (engagements / reach) * 100 : 0;
+  const followerChange = metrics.reduce(
+    (sum, row) => sum + row.entry.followerChange,
     0,
   );
   return (
     <>
       <PageTitle
         eyebrow="REPORTS"
-        title="Know what moved—and what worked."
-        description="Content balance, publishing output, engagement and lead conversion in one weekly-ready view."
+        title="One view of content performance."
+        description="Enter Instagram, YouTube, LinkedIn and Facebook results manually now. Zoho Analytics can feed the same view after it is connected."
+        action={
+          canAdd ? (
+            <Button onClick={onAdd} className="shrink-0">
+              <Plus /> Add metrics
+            </Button>
+          ) : undefined
+        }
       />
+      <Alert className="mb-5 border-[#dfa126]/35 bg-[#f7efdd] dark:bg-[#dfa126]/10">
+        <RefreshCw />
+        <AlertTitle>Unified reporting</AlertTitle>
+        <AlertDescription>
+          Manual snapshots are available. Zoho Analytics import will use this
+          same report once Zoho Social is connected.
+        </AlertDescription>
+      </Alert>
       <section className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
         <MetricCard
           label="Published"
@@ -2233,31 +2090,29 @@ function Reports({
           icon={UploadCloud}
         />
         <MetricCard
-          label="Recorded views"
+          label="Total views"
           value={new Intl.NumberFormat('en-IN', { notation: 'compact' }).format(
             views,
           )}
-          detail="Latest manual snapshots"
+          detail="Across visible snapshots"
           icon={BarChart3}
           accent
         />
         <MetricCard
-          label="Engagements"
-          value={new Intl.NumberFormat('en-IN', { notation: 'compact' }).format(
-            engagements,
-          )}
-          detail="Likes, comments and shares"
+          label="Engagement rate"
+          value={`${engagementRate.toFixed(1)}%`}
+          detail="Likes, comments, shares and saves ÷ reach"
           icon={MessageSquareText}
         />
         <MetricCard
-          label="Lead conversion"
-          value={`${Math.round((leads.filter((lead) => lead.status === 'Converted').length / Math.max(1, leads.length)) * 100)}%`}
-          detail={`${leads.filter((lead) => lead.status === 'Converted').length} of ${leads.length} captured leads`}
+          label="Follower change"
+          value={`${followerChange >= 0 ? '+' : ''}${new Intl.NumberFormat('en-IN').format(followerChange)}`}
+          detail={`${new Intl.NumberFormat('en-IN', { notation: 'compact' }).format(reach)} recorded reach`}
           icon={Users2}
         />
       </section>
       <section className="mt-6 grid gap-5 xl:grid-cols-[.85fr_1.15fr]">
-        <Card className="bg-white">
+        <Card className="bg-card">
           <CardHeader>
             <CardTitle>Content mix</CardTitle>
             <CardDescription>
@@ -2282,12 +2137,12 @@ function Reports({
                     </div>
                     <p className="text-sm">
                       <strong>{actual}%</strong>
-                      <span className="ml-2 text-[#858898]">
+                      <span className="ml-2 text-muted-foreground">
                         target {target}%
                       </span>
                     </p>
                   </div>
-                  <div className="h-2 overflow-hidden rounded-full bg-[#ececf0]">
+                  <div className="h-2 overflow-hidden rounded-full bg-muted">
                     <div
                       className="h-full rounded-full"
                       style={{ width: `${actual}%`, background: color }}
@@ -2298,7 +2153,7 @@ function Reports({
             })}
           </CardContent>
         </Card>
-        <Card className="bg-white">
+        <Card className="bg-card">
           <CardHeader>
             <CardTitle>Latest content performance</CardTitle>
             <CardDescription>
@@ -2312,12 +2167,12 @@ function Reports({
                   key={entry.id}
                   aria-label={`Open performance for ${item.title}`}
                   onClick={() => onOpen(item.id)}
-                  className="flex w-full items-center justify-between gap-4 rounded-xl border border-[#1f2342]/8 p-3.5 text-left hover:bg-[#fbfaf6]"
+                    className="flex w-full items-center justify-between gap-4 rounded-xl border p-3.5 text-left hover:bg-muted"
                 >
                   <div>
                     <p className="text-sm font-semibold">{item.title}</p>
-                    <p className="mt-1 text-xs text-[#777b8d]">
-                      {entry.platform} · {entry.recordedOn}
+                    <p className="mt-1 text-xs text-muted-foreground">
+                      {entry.platform} · {entry.recordedOn} · {entry.source}
                     </p>
                   </div>
                   <div className="text-right">
@@ -2326,12 +2181,19 @@ function Reports({
                         notation: 'compact',
                       }).format(entry.views)}
                     </p>
-                    <p className="text-[11px] text-[#777b8d]">views</p>
+                    <p className="text-[11px] text-muted-foreground">views</p>
                   </div>
                 </button>
               ))
             ) : (
-              <EmptyState text="Metrics will appear after the first snapshots are recorded." />
+              <div className="space-y-3">
+                <EmptyState text="No performance snapshots are visible for this role yet." />
+                {canAdd && (
+                  <Button variant="outline" onClick={onAdd}>
+                    <Plus /> Add the first snapshot
+                  </Button>
+                )}
+              </div>
             )}
           </CardContent>
         </Card>
@@ -2376,7 +2238,7 @@ function Requests({
         description="Requests arrive with an owner, deadline and priority before the content team plans them into Idea."
       />
       <div className="grid gap-5 xl:grid-cols-[.78fr_1.22fr]">
-        <Card className="h-fit bg-white">
+        <Card className="h-fit bg-card">
           <CardHeader>
             <CardTitle>New request</CardTitle>
             <CardDescription>
@@ -2461,7 +2323,7 @@ function Requests({
             )}
           </CardContent>
         </Card>
-        <Card className="bg-white">
+        <Card className="bg-card">
           <CardHeader>
             <CardTitle>Request queue</CardTitle>
             <CardDescription>
@@ -2472,7 +2334,7 @@ function Requests({
             {requests.map((item) => (
               <div
                 key={item.id}
-                className="rounded-xl border border-[#1f2342]/9 p-4"
+                className="rounded-xl border border-border p-4"
               >
                 <div className="flex flex-wrap items-start justify-between gap-3">
                   <div>
@@ -2487,10 +2349,10 @@ function Requests({
                         {item.status}
                       </Badge>
                     </div>
-                    <p className="mt-3 font-medium text-[#1f2342]">
+                    <p className="mt-3 font-medium text-card-foreground">
                       {item.request}
                     </p>
-                    <p className="mt-1 text-sm text-[#777b8d]">
+                    <p className="mt-1 text-sm text-muted-foreground">
                       {item.requester} · Needed {item.neededBy}
                     </p>
                   </div>
@@ -2516,7 +2378,7 @@ function MyActions({
   onReview: (item: ContentItem, approved: boolean, note: string) => void;
   onSaveMetric: (
     item: ContentItem,
-    values: { views: number; likes: number; comments: number; shares: number },
+    values: MetricDraft,
   ) => void;
 }) {
   const direct = actions.filter(
@@ -2532,11 +2394,11 @@ function MyActions({
         description="One personal queue, shaped automatically by your login, roles and assignments."
       />
       {!actions.length && (
-        <Card className="border-dashed bg-white">
+        <Card className="border-dashed bg-card">
           <CardContent className="grid place-items-center py-14 text-center">
             <CheckCircle2 className="mb-3 size-8 text-[#3b9171]" />
-            <p className="font-medium text-[#1f2342]">You are all caught up.</p>
-            <p className="mt-1 text-sm text-[#7b7f90]">
+            <p className="font-medium text-card-foreground">You are all caught up.</p>
+            <p className="mt-1 text-sm text-muted-foreground">
               New assignments and approvals will appear here.
             </p>
           </CardContent>
@@ -2545,7 +2407,7 @@ function MyActions({
       {direct.length > 0 && (
         <section className="mb-7">
           <div className="mb-3 flex items-center gap-2">
-            <h2 className="text-base font-semibold text-[#1f2342]">Next up</h2>
+            <h2 className="text-base font-semibold text-card-foreground">Next up</h2>
             <Badge variant="secondary">{direct.length}</Badge>
           </div>
           <div className="grid gap-3 xl:grid-cols-2">
@@ -2553,7 +2415,7 @@ function MyActions({
               <button
                 key={`${kind}-${item.id}`}
                 onClick={() => onOpen(item.id)}
-                className="flex w-full items-center justify-between gap-4 rounded-2xl border border-[#1f2342]/10 bg-white p-4 text-left shadow-sm transition hover:-translate-y-0.5 hover:shadow-md"
+                className="flex w-full items-center justify-between gap-4 rounded-2xl border border-border bg-card p-4 text-left shadow-sm transition hover:-translate-y-0.5 hover:shadow-md"
               >
                 <div className="min-w-0">
                   <div className="mb-2 flex flex-wrap items-center gap-2">
@@ -2570,12 +2432,12 @@ function MyActions({
                       <Badge variant="destructive">Overdue</Badge>
                     )}
                   </div>
-                  <p className="font-semibold text-[#1f2342]">{item.title}</p>
-                  <p className="mt-1 text-sm text-[#6f7285]">
+                  <p className="font-semibold text-card-foreground">{item.title}</p>
+                  <p className="mt-1 text-sm text-muted-foreground">
                     {item.stage} · {dueLabel(item)}
                   </p>
                 </div>
-                <ChevronRight className="size-5 shrink-0 text-[#a1a4b1]" />
+                <ChevronRight className="size-5 shrink-0 text-muted-foreground" />
               </button>
             ))}
           </div>
@@ -2584,7 +2446,7 @@ function MyActions({
       {reviews.length > 0 && (
         <section className="mb-7">
           <div className="mb-3 flex items-center gap-2">
-            <h2 className="text-base font-semibold text-[#1f2342]">
+            <h2 className="text-base font-semibold text-card-foreground">
               Second-lens review
             </h2>
             <Badge variant="secondary">{reviews.length}</Badge>
@@ -2604,7 +2466,7 @@ function MyActions({
       {metrics.length > 0 && (
         <section>
           <div className="mb-3 flex items-center gap-2">
-            <h2 className="text-base font-semibold text-[#1f2342]">
+            <h2 className="text-base font-semibold text-card-foreground">
               Metrics to record
             </h2>
             <Badge variant="secondary">{metrics.length}</Badge>
@@ -2636,7 +2498,7 @@ function ReviewCard({
 }) {
   const [note, setNote] = useState('');
   return (
-    <Card className="bg-white">
+    <Card className="bg-card">
       <CardHeader>
         <CardTitle>{item.title}</CardTitle>
         <CardDescription>
@@ -2687,7 +2549,7 @@ function Monitoring({
   onOpen: (id: string) => void;
   onSave: (
     item: ContentItem,
-    values: { views: number; likes: number; comments: number; shares: number },
+    values: MetricDraft,
   ) => void;
 }) {
   const missing = items.filter(
@@ -2703,7 +2565,7 @@ function Monitoring({
       />
       <div className="grid gap-5 xl:grid-cols-[1fr_.75fr]">
         <div className="space-y-4">
-          <h2 className="text-base font-semibold text-[#1f2342]">
+          <h2 className="text-base font-semibold text-card-foreground">
             Missing a metrics entry{' '}
             <Badge className="ml-2 bg-[#fff0e8] text-[#b34726]">
               {missing.length}
@@ -2718,7 +2580,7 @@ function Monitoring({
             />
           ))}
         </div>
-        <Card className="h-fit bg-white">
+        <Card className="h-fit bg-card">
           <CardHeader>
             <CardTitle>Latest snapshots</CardTitle>
             <CardDescription>Manually recorded performance</CardDescription>
@@ -2729,9 +2591,9 @@ function Monitoring({
                 <button
                   onClick={() => onOpen(item.id)}
                   key={metric.id}
-                  className="w-full rounded-xl bg-[#f4f1ea] p-4 text-left"
+                  className="w-full rounded-xl bg-background p-4 text-left"
                 >
-                  <p className="text-sm font-medium text-[#1f2342]">
+                  <p className="text-sm font-medium text-card-foreground">
                     {item.title}
                   </p>
                   <div className="mt-3 grid grid-cols-4 gap-2 text-center">
@@ -2757,7 +2619,7 @@ function MetricsCard({
   item: ContentItem;
   onSave: (
     item: ContentItem,
-    values: { views: number; likes: number; comments: number; shares: number },
+    values: MetricDraft,
   ) => void;
   onOpen: (id: string) => void;
 }) {
@@ -2768,7 +2630,7 @@ function MetricsCard({
     shares: 0,
   });
   return (
-    <Card className="bg-white">
+    <Card className="bg-card">
       <CardHeader>
         <CardTitle>{item.title}</CardTitle>
         <CardDescription>
@@ -2795,7 +2657,23 @@ function MetricsCard({
           ))}
         </div>
         <div className="mt-4 flex gap-2">
-          <Button onClick={() => onSave(item, values)}>Save snapshot</Button>
+          <Button
+            onClick={() =>
+              onSave(item, {
+                platform: item.platform,
+                contentUrl: item.links.find((link) => link.kind === 'Published post')?.url,
+                recordedOn: new Date().toISOString().slice(0, 10),
+                reach: 0,
+                impressions: 0,
+                saves: 0,
+                watchTimeMinutes: 0,
+                followerChange: 0,
+                ...values,
+              })
+            }
+          >
+            Save quick snapshot
+          </Button>
           <Button variant="ghost" onClick={() => onOpen(item.id)}>
             Open item
           </Button>
@@ -2807,10 +2685,10 @@ function MetricsCard({
 function MiniStat({ label, value }: { label: string; value: number }) {
   return (
     <div>
-      <p className="font-display text-lg font-semibold text-[#1f2342]">
+      <p className="font-display text-lg font-semibold text-card-foreground">
         {new Intl.NumberFormat('en-IN', { notation: 'compact' }).format(value)}
       </p>
-      <p className="text-[10px] text-[#7b7f90]">{label}</p>
+      <p className="text-[10px] text-muted-foreground">{label}</p>
     </div>
   );
 }
@@ -2862,7 +2740,7 @@ function Stakeholder({ items }: { items: ContentItem[] }) {
         />
       </div>
       <div className="mt-5 grid gap-5 xl:grid-cols-2">
-        <Card className="bg-white">
+        <Card className="bg-card">
           <CardHeader>
             <CardTitle>Who is accountable</CardTitle>
           </CardHeader>
@@ -2870,20 +2748,20 @@ function Stakeholder({ items }: { items: ContentItem[] }) {
             {active.slice(0, 6).map((item) => (
               <div
                 key={item.id}
-                className="flex items-center justify-between gap-4 rounded-xl border border-[#1f2342]/8 p-3"
+                className="flex items-center justify-between gap-4 rounded-xl border border-border p-3"
               >
                 <div>
-                  <p className="text-sm font-medium text-[#1f2342]">
+                  <p className="text-sm font-medium text-card-foreground">
                     {item.title}
                   </p>
-                  <p className="mt-1 text-xs text-[#7b7f90]">{item.stage}</p>
+                  <p className="mt-1 text-xs text-muted-foreground">{item.stage}</p>
                 </div>
                 <Owners people={item.accountable} />
               </div>
             ))}
           </CardContent>
         </Card>
-        <Card className="bg-white">
+        <Card className="bg-card">
           <CardHeader>
             <CardTitle>Recent overrides</CardTitle>
             <CardDescription>
@@ -2934,7 +2812,7 @@ function People({
           </AlertDescription>
         </Alert>
         {demoMode && (
-          <Alert className="border-[#1f2342]/15 bg-white">
+          <Alert className="border-border bg-card">
             <UserRound />
             <AlertTitle>Demonstration team</AlertTitle>
             <AlertDescription>
@@ -2973,7 +2851,7 @@ function AccessCard({
     'Read-only Stakeholder',
   ];
   return (
-    <Card className={`bg-white ${isOwner ? 'ring-1 ring-[#dfa126]/50' : ''}`}>
+    <Card className={`bg-card ${isOwner ? 'ring-1 ring-[#dfa126]/50' : ''}`}>
       <CardHeader>
         <div className="flex items-start gap-3">
           <Avatar person={person} />
@@ -2986,7 +2864,7 @@ function AccessCard({
           {isOwner && <Badge className="bg-[#1f2342] text-white">Owner</Badge>}
         </div>
         {person.responsibility && (
-          <p className="mt-3 text-sm leading-relaxed text-[#62667a]">
+          <p className="mt-3 text-sm leading-relaxed text-muted-foreground">
             {person.responsibility}
           </p>
         )}
@@ -2999,7 +2877,7 @@ function AccessCard({
           </p>
         ) : (
           <>
-            <div className="mb-3 flex items-center justify-between rounded-xl border border-[#1f2342]/10 p-3 text-sm font-medium">
+            <div className="mb-3 flex items-center justify-between rounded-xl border border-border p-3 text-sm font-medium">
               <span>App access</span>
               <Checkbox
                 aria-label="Toggle app access"
@@ -3011,7 +2889,7 @@ function AccessCard({
               {assignable.map((role) => (
                 <label
                   key={role}
-                  className="flex cursor-pointer items-center gap-2.5 text-sm text-[#525570]"
+                  className="flex cursor-pointer items-center gap-2.5 text-sm text-muted-foreground"
                 >
                   <Checkbox
                     checked={roles.includes(role)}
@@ -3044,10 +2922,8 @@ function Settings({ demoMode }: { demoMode: boolean }) {
   const [hours, setHours] = useState(24);
   const [savedHours, setSavedHours] = useState(24);
   const integrations = [
-    { name: 'Zoho Social', use: 'Scheduling and publishing' },
-    { name: 'ManyChat / SuperProfile', use: 'Comment and DM automation' },
-    { name: 'CRM', use: 'Lead routing and conversion' },
-    { name: 'Looker Studio', use: 'Analytics dashboards' },
+    { name: 'Zoho Social', use: 'Social publishing and community management' },
+    { name: 'Zoho Analytics', use: 'Automated performance import into Reports' },
     { name: 'ChatCut', use: 'Long-video clipping assistance' },
   ];
   return (
@@ -3059,7 +2935,7 @@ function Settings({ demoMode }: { demoMode: boolean }) {
       />
       <div className="grid gap-5 xl:grid-cols-[.8fr_1.2fr]">
         <div className="space-y-5">
-          <Card className="bg-white">
+          <Card className="bg-card">
             <CardHeader>
               <CardTitle>Due-date reminders</CardTitle>
               <CardDescription>Default lead time for new items</CardDescription>
@@ -3076,33 +2952,33 @@ function Settings({ demoMode }: { demoMode: boolean }) {
                 />
                 <Button onClick={() => setSavedHours(hours)}>Save</Button>
               </div>
-              <p className="mt-3 text-xs text-[#7b7f90]">
+              <p className="mt-3 text-xs text-muted-foreground">
                 {savedHours} hours is saved for new items. Each content item can
                 override it.
               </p>
             </CardContent>
           </Card>
-          <Card className="bg-white">
+          <Card className="bg-card">
             <CardHeader>
               <CardTitle>Workspace</CardTitle>
             </CardHeader>
             <CardContent className="space-y-3 text-sm">
               <div className="flex justify-between gap-4">
-                <span className="text-[#777b8d]">Time zone</span>
+                <span className="text-muted-foreground">Time zone</span>
                 <strong>Asia/Kolkata</strong>
               </div>
               <div className="flex justify-between gap-4">
-                <span className="text-[#777b8d]">Owner IDs</span>
+                <span className="text-muted-foreground">Owner IDs</span>
                 <strong>2 protected slots</strong>
               </div>
               <div className="flex justify-between gap-4">
-                <span className="text-[#777b8d]">Authentication</span>
+                <span className="text-muted-foreground">Authentication</span>
                 <strong>Email + password</strong>
               </div>
             </CardContent>
           </Card>
         </div>
-        <Card className="bg-white">
+        <Card className="bg-card">
           <CardHeader>
             <CardTitle>Integration centre</CardTitle>
             <CardDescription>
@@ -3114,11 +2990,11 @@ function Settings({ demoMode }: { demoMode: boolean }) {
             {integrations.map((integration) => (
               <div
                 key={integration.name}
-                className="flex items-center justify-between gap-4 rounded-xl border border-[#1f2342]/9 p-3.5"
+                className="flex items-center justify-between gap-4 rounded-xl border border-border p-3.5"
               >
                 <div>
                   <p className="text-sm font-semibold">{integration.name}</p>
-                  <p className="mt-1 text-xs text-[#777b8d]">
+                  <p className="mt-1 text-xs text-muted-foreground">
                     {integration.use}
                   </p>
                 </div>
@@ -3127,17 +3003,17 @@ function Settings({ demoMode }: { demoMode: boolean }) {
                 </Badge>
               </div>
             ))}
-            <div className="mt-3 rounded-xl bg-[#f6f4ee] p-4">
+            <div className="mt-3 rounded-xl bg-muted p-4">
               <div className="flex items-center gap-2">
                 <span className="size-2 rounded-full bg-[#dfa126]" />
                 <p className="text-sm font-semibold">Resend email delivery</p>
               </div>
-              <p className="mt-2 text-sm text-[#676b7c]">
+              <p className="mt-2 text-sm text-muted-foreground">
                 Approval and due-date messages queue safely. Add the API key and
                 verified sender when available.
               </p>
               {demoMode && (
-                <Badge className="mt-3 bg-[#eceef7] text-[#1f2342]">
+                <Badge className="mt-3 bg-[#eceef7] text-card-foreground">
                   Demonstration data active
                 </Badge>
               )}
@@ -3176,7 +3052,7 @@ function ItemDetail({
   onComment: (item: ContentItem, body: string, parentId?: string) => void;
   onMetric: (
     item: ContentItem,
-    values: { views: number; likes: number; comments: number; shares: number },
+    values: MetricDraft,
   ) => void;
 }) {
   const [comment, setComment] = useState('');
@@ -3222,17 +3098,17 @@ function ItemDetail({
 
             <TabsContent value="work" className="space-y-5 py-5">
               <div>
-                <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-[#7b7f90]">
+                <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
                   Pipeline progress
                 </p>
                 <Progress value={stagePercent(item.stage)} />
-                <div className="mt-2 flex justify-between text-xs text-[#7b7f90]">
+                <div className="mt-2 flex justify-between text-xs text-muted-foreground">
                   <span>{item.stage}</span>
                   <span>{Math.round(stagePercent(item.stage))}%</span>
                 </div>
               </div>
               <div>
-                <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-[#7b7f90]">
+                <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
                   Checkpoint inside {item.stage}
                 </p>
                 <div className="grid gap-2">
@@ -3247,10 +3123,10 @@ function ItemDetail({
                         key={step}
                         disabled={readOnly || !canSubmit}
                         onClick={() => onStepChange(item, step)}
-                        className={`flex items-center gap-3 rounded-xl border p-3 text-left transition ${active ? 'border-[#dfa126] bg-[#fff8e8]' : complete ? 'border-[#1f2342]/8 bg-[#f2f3f6]' : 'border-[#1f2342]/8 bg-white'} disabled:cursor-default`}
+                        className={`flex items-center gap-3 rounded-xl border p-3 text-left transition ${active ? 'border-[#dfa126] bg-[#fff8e8]' : complete ? 'border-border bg-muted' : 'border-border bg-card'} disabled:cursor-default`}
                       >
                         <span
-                          className={`grid size-6 shrink-0 place-items-center rounded-full text-xs font-bold ${active ? 'bg-[#dfa126] text-[#1f2342]' : complete ? 'bg-[#3b9171] text-white' : 'bg-[#eceef2] text-[#777b8d]'}`}
+                          className={`grid size-6 shrink-0 place-items-center rounded-full text-xs font-bold ${active ? 'bg-[#dfa126] text-card-foreground' : complete ? 'bg-[#3b9171] text-white' : 'bg-muted text-muted-foreground'}`}
                         >
                           {complete ? (
                             <Check className="size-3.5" />
@@ -3287,7 +3163,7 @@ function ItemDetail({
                 </Alert>
               )}
               <div>
-                <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-[#7b7f90]">
+                <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
                   External files
                 </p>
                 <div className="space-y-2">
@@ -3297,7 +3173,7 @@ function ItemDetail({
                       href={link.url}
                       target="_blank"
                       rel="noreferrer"
-                      className="flex items-center justify-between rounded-xl border p-3 text-sm hover:bg-[#f4f1ea]"
+                      className="flex items-center justify-between rounded-xl border p-3 text-sm hover:bg-background"
                     >
                       <span className="flex items-center gap-2">
                         <Link2 className="size-4 text-[#b27708]" />
@@ -3307,7 +3183,7 @@ function ItemDetail({
                     </a>
                   ))}
                   {!item.links.length && (
-                    <p className="rounded-xl border border-dashed p-4 text-center text-sm text-[#7b7f90]">
+                    <p className="rounded-xl border border-dashed p-4 text-center text-sm text-muted-foreground">
                       No links added yet.
                     </p>
                   )}
@@ -3333,9 +3209,9 @@ function ItemDetail({
                       <div className="min-w-0 flex-1">
                         <div className="flex justify-between gap-3">
                           <p className="text-sm font-medium">{entry.author}</p>
-                          <p className="text-xs text-[#8b8e9e]">{entry.at}</p>
+                          <p className="text-xs text-muted-foreground">{entry.at}</p>
                         </div>
-                        <p className="mt-1 text-sm leading-relaxed text-[#525570]">
+                        <p className="mt-1 text-sm leading-relaxed text-muted-foreground">
                           {entry.body}
                         </p>
                       </div>
@@ -3343,7 +3219,7 @@ function ItemDetail({
                   </div>
                 ))}
                 {!item.comments.length && (
-                  <p className="py-6 text-center text-sm text-[#7b7f90]">
+                  <p className="py-6 text-center text-sm text-muted-foreground">
                     No comments yet.
                   </p>
                 )}
@@ -3370,7 +3246,7 @@ function ItemDetail({
             </TabsContent>
 
             <TabsContent value="history" className="py-5">
-              <div className="relative space-y-5 before:absolute before:bottom-2 before:left-[7px] before:top-2 before:w-px before:bg-[#dfe1e8]">
+              <div className="relative space-y-5 before:absolute before:bottom-2 before:left-[7px] before:top-2 before:w-px before:bg-border">
                 {item.history.map((event, index) => (
                   <div key={event.at + index} className="relative pl-7">
                     <span
@@ -3379,10 +3255,10 @@ function ItemDetail({
                         (event.flagged ? 'bg-[#b34726]' : 'bg-[#dfa126]')
                       }
                     />
-                    <p className="text-sm font-medium capitalize text-[#1f2342]">
+                    <p className="text-sm font-medium capitalize text-card-foreground">
                       {event.action}
                     </p>
-                    <p className="mt-1 text-xs text-[#7b7f90]">
+                    <p className="mt-1 text-xs text-muted-foreground">
                       {event.actor} · {event.at}
                     </p>
                     {event.note && (
@@ -3391,7 +3267,7 @@ function ItemDetail({
                           'mt-2 rounded-lg p-3 text-sm ' +
                           (event.flagged
                             ? 'bg-[#fff0e8] text-[#8a341b]'
-                            : 'bg-[#f4f1ea] text-[#525570]')
+                            : 'bg-background text-muted-foreground')
                         }
                       >
                         {event.note}
@@ -3405,20 +3281,30 @@ function ItemDetail({
             <TabsContent value="metrics" className="py-5">
               <div className="space-y-3">
                 {item.metrics.map((metric) => (
-                  <div key={metric.id} className="rounded-xl bg-[#f4f1ea] p-4">
-                    <p className="mb-3 text-sm font-medium">
-                      {metric.platform} · {metric.recordedOn}
-                    </p>
-                    <div className="grid grid-cols-4 gap-2">
-                      <MiniStat label="Views" value={metric.views} />
-                      <MiniStat label="Likes" value={metric.likes} />
-                      <MiniStat label="Comments" value={metric.comments} />
-                      <MiniStat label="Shares" value={metric.shares} />
+                  <div key={metric.id} className="rounded-xl bg-muted p-4">
+                    <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+                      <p className="text-sm font-medium">
+                        {metric.platform} · {metric.recordedOn}
+                      </p>
+                      <Badge variant="secondary">{metric.source}</Badge>
                     </div>
+                    <div className="grid grid-cols-3 gap-2 sm:grid-cols-6">
+                      <MiniStat label="Views" value={metric.views} />
+                      <MiniStat label="Reach" value={metric.reach} />
+                      <MiniStat label="Impressions" value={metric.impressions} />
+                      <MiniStat label="Likes" value={metric.likes} />
+                      <MiniStat label="Shares" value={metric.shares} />
+                      <MiniStat label="Saves" value={metric.saves} />
+                    </div>
+                    {metric.notes && (
+                      <p className="mt-3 text-sm text-muted-foreground">
+                        {metric.notes}
+                      </p>
+                    )}
                   </div>
                 ))}
                 {!item.metrics.length && (
-                  <p className="py-6 text-center text-sm text-[#7b7f90]">
+                  <p className="py-6 text-center text-sm text-muted-foreground">
                     No metrics recorded yet.
                   </p>
                 )}
@@ -3436,7 +3322,7 @@ function ItemDetail({
         </div>
 
         {!readOnly && (
-          <SheetFooter className="sticky bottom-0 border-t bg-white px-5 py-4">
+          <SheetFooter className="sticky bottom-0 border-t bg-card px-5 py-4">
             <div className="w-full space-y-2">
               {item.status === 'Pending approval' && canApprove ? (
                 <>
@@ -3474,8 +3360,8 @@ function ItemDetail({
 }
 function InfoBlock({ label, people }: { label: string; people: Person[] }) {
   return (
-    <div className="rounded-xl bg-[#f4f1ea] p-4">
-      <p className="text-xs font-semibold uppercase tracking-wide text-[#7b7f90]">
+    <div className="rounded-xl bg-background p-4">
+      <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
         {label}
       </p>
       <div className="mt-3 space-y-2">
@@ -3485,9 +3371,180 @@ function InfoBlock({ label, people }: { label: string; people: Person[] }) {
             <span className="text-sm font-medium">{person.name}</span>
           </div>
         ))}
-        {!people.length && <p className="text-sm text-[#7b7f90]">Unassigned</p>}
+        {!people.length && <p className="text-sm text-muted-foreground">Unassigned</p>}
       </div>
     </div>
+  );
+}
+
+function MetricsDialog({
+  open,
+  onOpenChange,
+  items,
+  onSave,
+}: {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  items: ContentItem[];
+  onSave: (item: ContentItem, values: MetricDraft) => void;
+}) {
+  const [itemId, setItemId] = useState(items[0]?.id ?? '');
+  const selected = items.find((item) => item.id === itemId) ?? items[0];
+  const [platform, setPlatform] = useState(selected?.platform ?? 'Instagram');
+  const [contentUrl, setContentUrl] = useState(
+    selected?.links.find((link) => link.kind === 'Published post')?.url ?? '',
+  );
+  const [recordedOn, setRecordedOn] = useState(
+    new Date().toISOString().slice(0, 10),
+  );
+  const [values, setValues] = useState({
+    views: 0,
+    reach: 0,
+    impressions: 0,
+    likes: 0,
+    comments: 0,
+    shares: 0,
+    saves: 0,
+    watchTimeMinutes: 0,
+    followerChange: 0,
+  });
+  const [notes, setNotes] = useState('');
+
+  const chooseItem = (id: string) => {
+    setItemId(id);
+    const item = items.find((entry) => entry.id === id);
+    if (!item) return;
+    setPlatform(item.platform);
+    setContentUrl(
+      item.links.find((link) => link.kind === 'Published post')?.url ?? '',
+    );
+  };
+  const submit = (event: SyntheticEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (!selected) return;
+    onSave(selected, {
+      platform,
+      contentUrl: contentUrl.trim() || undefined,
+      recordedOn,
+      notes: notes.trim() || undefined,
+      ...values,
+    });
+    onOpenChange(false);
+  };
+  const numberFields: Array<[keyof typeof values, string]> = [
+    ['views', 'Views'],
+    ['reach', 'Reach'],
+    ['impressions', 'Impressions'],
+    ['likes', 'Likes'],
+    ['comments', 'Comments'],
+    ['shares', 'Shares'],
+    ['saves', 'Saves'],
+    ['watchTimeMinutes', 'Watch time (minutes)'],
+    ['followerChange', 'Follower change'],
+  ];
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-h-[92vh] overflow-y-auto sm:max-w-2xl">
+        <DialogHeader>
+          <DialogTitle className="font-display text-xl">
+            Add performance snapshot
+          </DialogTitle>
+          <DialogDescription>
+            Enter the numbers shown in Instagram, YouTube, LinkedIn or Facebook.
+            The snapshot is labelled Manual in the unified report.
+          </DialogDescription>
+        </DialogHeader>
+        {selected ? (
+          <form onSubmit={submit} className="space-y-4">
+            <div className="grid gap-3 sm:grid-cols-2">
+              <div>
+                <Label className="mb-1.5">Published content</Label>
+                <NativeSelect
+                  className="w-full bg-card"
+                  value={selected.id}
+                  onChange={(event) => chooseItem(event.target.value)}
+                >
+                  {items.map((item) => (
+                    <NativeSelectOption key={item.id} value={item.id}>
+                      {item.title}
+                    </NativeSelectOption>
+                  ))}
+                </NativeSelect>
+              </div>
+              <div>
+                <Label className="mb-1.5">Platform</Label>
+                <NativeSelect
+                  className="w-full bg-card"
+                  value={platform}
+                  onChange={(event) => setPlatform(event.target.value)}
+                >
+                  {['Instagram', 'YouTube', 'LinkedIn', 'Facebook'].map(
+                    (value) => (
+                      <NativeSelectOption key={value}>{value}</NativeSelectOption>
+                    ),
+                  )}
+                </NativeSelect>
+              </div>
+            </div>
+            <div className="grid gap-3 sm:grid-cols-[1fr_180px]">
+              <div>
+                <Label className="mb-1.5">Content URL</Label>
+                <Input
+                  type="url"
+                  value={contentUrl}
+                  onChange={(event) => setContentUrl(event.target.value)}
+                  placeholder="https://…"
+                />
+              </div>
+              <div>
+                <Label className="mb-1.5">Reporting date</Label>
+                <Input
+                  type="date"
+                  value={recordedOn}
+                  onChange={(event) => setRecordedOn(event.target.value)}
+                  required
+                />
+              </div>
+            </div>
+            <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
+              {numberFields.map(([key, label]) => (
+                <div key={key}>
+                  <Label className="mb-1.5">{label}</Label>
+                  <Input
+                    type="number"
+                    min={key === 'followerChange' ? undefined : 0}
+                    value={values[key]}
+                    onChange={(event) =>
+                      setValues({ ...values, [key]: Number(event.target.value) })
+                    }
+                  />
+                </div>
+              ))}
+            </div>
+            <div>
+              <Label className="mb-1.5">Notes</Label>
+              <Textarea
+                value={notes}
+                onChange={(event) => setNotes(event.target.value)}
+                placeholder="What worked, what changed, or what to test next"
+              />
+            </div>
+            <DialogFooter>
+              <Button
+                type="button"
+                variant="outline"
+                onClick={() => onOpenChange(false)}
+              >
+                Cancel
+              </Button>
+              <Button type="submit">Save snapshot</Button>
+            </DialogFooter>
+          </form>
+        ) : (
+          <EmptyState text="Publish at least one content item before recording metrics." />
+        )}
+      </DialogContent>
+    </Dialog>
   );
 }
 
@@ -3512,8 +3569,10 @@ function CreateDialog({
   }) => void;
 }) {
   const [title, setTitle] = useState('');
-  const [contentType, setContentType] = useState('Instagram Reel');
   const [platform, setPlatform] = useState('Instagram');
+  const [contentType, setContentType] = useState(
+    PLATFORM_CONTENT_TYPES.Instagram[0],
+  );
   const [pillar, setPillar] = useState<ContentPillar>('Knowledge');
   const [dueAt, setDueAt] = useState('');
   const [responsibleId, setResponsibleId] = useState(
@@ -3521,6 +3580,7 @@ function CreateDialog({
   );
   const [accountableIds, setAccountableIds] = useState<string[]>([]);
   const [copyOwners, setCopyOwners] = useState(true);
+  const availableTypes = PLATFORM_CONTENT_TYPES[platform];
   const submit = (event: SyntheticEvent<HTMLFormElement>) => {
     event.preventDefault();
     if (!title.trim() || !responsibleId || !accountableIds.length) return;
@@ -3566,14 +3626,7 @@ function CreateDialog({
                 value={contentType}
                 onChange={(event) => setContentType(event.target.value)}
               >
-                {[
-                  'Instagram Reel',
-                  'Instagram Post',
-                  'YouTube Video',
-                  'YouTube Short',
-                  'LinkedIn Post',
-                  'Carousel',
-                ].map((value) => (
+                {availableTypes.map((value) => (
                   <NativeSelectOption key={value}>{value}</NativeSelectOption>
                 ))}
               </NativeSelect>
@@ -3583,7 +3636,11 @@ function CreateDialog({
               <NativeSelect
                 className="w-full"
                 value={platform}
-                onChange={(event) => setPlatform(event.target.value)}
+                onChange={(event) => {
+                  const nextPlatform = event.target.value;
+                  setPlatform(nextPlatform);
+                  setContentType(PLATFORM_CONTENT_TYPES[nextPlatform][0]);
+                }}
               >
                 {[
                   'Instagram',
@@ -3637,7 +3694,7 @@ function CreateDialog({
           </div>
           <div>
             <Label>Accountable owners</Label>
-            <p className="mb-2 mt-1 text-xs text-[#7b7f90]">
+            <p className="mb-2 mt-1 text-xs text-muted-foreground">
               Choose one or more people. Any accountable owner can approve the
               transition.
             </p>
@@ -3669,7 +3726,7 @@ function CreateDialog({
               onCheckedChange={(checked) => setCopyOwners(Boolean(checked))}
             />
             <span>
-              <strong className="block text-[#1f2342]">
+              <strong className="block text-card-foreground">
                 Plan accountability ahead
               </strong>
               <span className="text-[#6b5b35]">
@@ -3767,9 +3824,9 @@ function MoveDialog({
           </DialogDescription>
         </DialogHeader>
         {intent && (
-          <div className="rounded-xl bg-[#f4f1ea] p-4">
-            <p className="font-medium text-[#1f2342]">{intent.item.title}</p>
-            <p className="mt-1 text-sm text-[#6f7285]">
+          <div className="rounded-xl bg-background p-4">
+            <p className="font-medium text-card-foreground">{intent.item.title}</p>
+            <p className="mt-1 text-sm text-muted-foreground">
               {intent.item.stage} <ArrowRight className="mx-1 inline size-4" />{' '}
               {intent.toStage}
             </p>
@@ -3808,7 +3865,7 @@ function LoginScreen({
     setBusy(false);
   };
   return (
-    <div className="grid min-h-svh place-items-center bg-[#f4f1ea] p-4">
+    <div className="grid min-h-svh place-items-center bg-background p-4">
       <div className="w-full max-w-md">
         <Image
           src="/aafm-india-logo.png"
@@ -3817,7 +3874,7 @@ function LoginScreen({
           height={594}
           className="mx-auto mb-7 h-auto w-full max-w-[360px]"
         />
-        <Card className="bg-white p-2 shadow-xl">
+        <Card className="bg-card p-2 shadow-xl">
           <CardHeader>
             <CardTitle className="font-display text-2xl">
               Sign in to Content Operations
@@ -3853,7 +3910,7 @@ function LoginScreen({
             </form>
           </CardContent>
         </Card>
-        <p className="mt-4 text-center text-xs text-[#7b7f90]">
+        <p className="mt-4 text-center text-xs text-muted-foreground">
           Invite-only access · Asia/Kolkata
         </p>
       </div>
@@ -3862,10 +3919,10 @@ function LoginScreen({
 }
 function LoadingScreen() {
   return (
-    <div className="grid min-h-svh place-items-center bg-[#f4f1ea]">
+    <div className="grid min-h-svh place-items-center bg-background">
       <div className="text-center">
         <div className="mx-auto mb-4 size-9 animate-spin rounded-full border-2 border-[#dfa126] border-t-transparent" />
-        <p className="text-sm text-[#525570]">Opening content operations…</p>
+        <p className="text-sm text-muted-foreground">Opening content operations…</p>
       </div>
     </div>
   );
@@ -3878,14 +3935,14 @@ function PendingAccess({
   signOut: () => void;
 }) {
   return (
-    <div className="grid min-h-svh place-items-center bg-[#f4f1ea] p-4">
-      <Card className="max-w-md bg-white">
+    <div className="grid min-h-svh place-items-center bg-background p-4">
+      <Card className="max-w-md bg-card">
         <CardHeader>
           <CardTitle>Access is waiting for an Owner</CardTitle>
           <CardDescription>{email}</CardDescription>
         </CardHeader>
         <CardContent>
-          <p className="text-sm text-[#525570]">
+          <p className="text-sm text-muted-foreground">
             Your account is valid. One of the two workspace Owners needs to
             activate it and assign at least one role.
           </p>

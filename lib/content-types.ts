@@ -32,10 +32,18 @@ export const STAGE_STEPS: Record<Stage, readonly string[]> = {
   ],
   Upload: ['Platform scheduling', 'Publishing'],
   'Post-Upload Metrics': [
-    'Engagement monitoring',
-    'Lead follow-up',
+    'Performance snapshot',
     'Weekly or monthly reporting',
+    'Learning notes',
   ],
+};
+
+export const PLATFORM_CONTENT_TYPES: Record<string, readonly string[]> = {
+  Instagram: ['Reel', 'Post', 'Carousel'],
+  YouTube: ['Short', 'Video'],
+  LinkedIn: ['Post', 'Carousel'],
+  Facebook: ['Post', 'Carousel'],
+  'Multi-platform': ['Post', 'Carousel'],
 };
 
 export type Person = {
@@ -66,10 +74,18 @@ export type Comment = {
 export type MetricEntry = {
   id: string;
   platform: string;
+  contentUrl?: string;
   views: number;
+  reach: number;
+  impressions: number;
   likes: number;
   comments: number;
   shares: number;
+  saves: number;
+  watchTimeMinutes: number;
+  followerChange: number;
+  notes?: string;
+  source: 'Manual' | 'Zoho Analytics';
   recordedOn: string;
 };
 export type ContentItem = {
@@ -97,28 +113,6 @@ export type ContentItem = {
   comments: Comment[];
   metrics: MetricEntry[];
   publishedAt?: string;
-};
-
-export type LeadStatus = 'New' | 'Qualified' | 'Follow-up due' | 'Converted';
-export type Lead = {
-  id: string;
-  name: string;
-  source: string;
-  interest: string;
-  owner: string;
-  status: LeadStatus;
-  capturedAt: string;
-  nextFollowUp?: string;
-};
-
-export type InboxItem = {
-  id: string;
-  person: string;
-  channel: string;
-  message: string;
-  detectedKeyword?: string;
-  sensitive?: boolean;
-  status: 'Needs reply' | 'Auto-response sent' | 'Resolved';
 };
 
 export type DepartmentRequest = {

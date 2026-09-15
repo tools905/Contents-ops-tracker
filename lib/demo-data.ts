@@ -1,8 +1,6 @@
 import type {
   ContentItem,
   DepartmentRequest,
-  InboxItem,
-  Lead,
   Person,
 } from './content-types';
 
@@ -32,7 +30,7 @@ export const demoPeople: Person[] = [
     initials: 'CH',
     roles: ['Content Producer', 'Monitoring'],
     isActive: true,
-    responsibility: 'Publishing, calendar, community, leads and reporting',
+    responsibility: 'Publishing, calendar and performance reporting',
   },
   {
     id: 'p4',
@@ -107,7 +105,7 @@ export const demoItems: ContentItem[] = [
   {
     id: 'c1',
     title: 'CWM: Career paths in private banking',
-    contentType: 'Instagram Reel',
+    contentType: 'Reel',
     platform: 'Instagram',
     pillar: 'Knowledge',
     workflowStep: 'Financial compliance',
@@ -153,7 +151,7 @@ export const demoItems: ContentItem[] = [
   {
     id: 'c2',
     title: 'Estate planning myths: carousel',
-    contentType: 'LinkedIn Carousel',
+    contentType: 'Carousel',
     platform: 'LinkedIn',
     pillar: 'Knowledge',
     workflowStep: 'Harshit quality check',
@@ -203,7 +201,7 @@ export const demoItems: ContentItem[] = [
   {
     id: 'c3',
     title: 'September admissions campaign calendar',
-    contentType: 'Campaign Plan',
+    contentType: 'Post',
     platform: 'Multi-platform',
     pillar: 'Promotional',
     workflowStep: 'Calendar slot',
@@ -235,7 +233,7 @@ export const demoItems: ContentItem[] = [
   {
     id: 'c4',
     title: 'Inside the Wealth & Alternates Convention',
-    contentType: 'YouTube Video',
+    contentType: 'Video',
     platform: 'YouTube',
     pillar: 'AAFM India Insider',
     workflowStep: 'Recording',
@@ -263,7 +261,7 @@ export const demoItems: ContentItem[] = [
   {
     id: 'c5',
     title: 'CFP vs CWM: which path fits whom?',
-    contentType: 'YouTube Short',
+    contentType: 'Short',
     platform: 'YouTube',
     pillar: 'Knowledge',
     workflowStep: 'Subject-matter validation',
@@ -292,7 +290,7 @@ export const demoItems: ContentItem[] = [
   {
     id: 'c6',
     title: 'Student testimonial: first role after CWM',
-    contentType: 'Instagram Reel',
+    contentType: 'Reel',
     platform: 'Instagram',
     pillar: 'AAFM India Insider',
     workflowStep: 'Priya final approval',
@@ -324,7 +322,7 @@ export const demoItems: ContentItem[] = [
   {
     id: 'c7',
     title: 'Financial literacy week: daily tips',
-    contentType: 'Instagram Post',
+    contentType: 'Post',
     platform: 'Instagram',
     pillar: 'Knowledge',
     workflowStep: 'Platform scheduling',
@@ -356,7 +354,7 @@ export const demoItems: ContentItem[] = [
   {
     id: 'c8',
     title: 'Executive program enrolment deadline',
-    contentType: 'LinkedIn Post',
+    contentType: 'Post',
     platform: 'LinkedIn',
     pillar: 'Promotional',
     workflowStep: 'Publishing',
@@ -388,10 +386,10 @@ export const demoItems: ContentItem[] = [
   {
     id: 'c9',
     title: 'How compounding changes long-term outcomes',
-    contentType: 'Instagram Reel',
+    contentType: 'Reel',
     platform: 'Instagram',
     pillar: 'Knowledge',
-    workflowStep: 'Engagement monitoring',
+    workflowStep: 'Performance snapshot',
     stage: 'Post-Upload Metrics',
     status: 'In progress',
     dueAt: '2026-09-11T13:00:00+05:30',
@@ -415,7 +413,7 @@ export const demoItems: ContentItem[] = [
   {
     id: 'c10',
     title: 'Three portfolio mistakes new advisors make',
-    contentType: 'LinkedIn Post',
+    contentType: 'Post',
     platform: 'LinkedIn',
     pillar: 'Knowledge',
     workflowStep: 'Weekly or monthly reporting',
@@ -443,81 +441,21 @@ export const demoItems: ContentItem[] = [
       {
         id: 'me1',
         platform: 'LinkedIn',
+        contentUrl: 'https://linkedin.com/company/aafmindia/',
         views: 8240,
+        reach: 6910,
+        impressions: 9420,
         likes: 311,
         comments: 26,
         shares: 49,
+        saves: 34,
+        watchTimeMinutes: 0,
+        followerChange: 18,
+        notes: 'Educational list format outperformed the weekly average.',
+        source: 'Manual',
         recordedOn: '2026-09-10',
       },
     ],
-  },
-];
-
-export const demoLeads: Lead[] = [
-  {
-    id: 'l1',
-    name: 'Rhea Kapoor',
-    source: 'Instagram comment',
-    interest: 'CWM programme',
-    owner: 'Admissions',
-    status: 'New',
-    capturedAt: 'Today · 2:14 PM',
-    nextFollowUp: '11 Sep · 11:00 AM',
-  },
-  {
-    id: 'l2',
-    name: 'Arjun Mehta',
-    source: 'LinkedIn DM',
-    interest: 'Corporate training',
-    owner: 'B2B Partnerships',
-    status: 'Qualified',
-    capturedAt: 'Today · 11:06 AM',
-    nextFollowUp: '12 Sep · 3:00 PM',
-  },
-  {
-    id: 'l3',
-    name: 'Nandita Shah',
-    source: 'Instagram keyword: CWM',
-    interest: 'CWM programme',
-    owner: 'Admissions',
-    status: 'Follow-up due',
-    capturedAt: '9 Sep · 5:22 PM',
-    nextFollowUp: 'Today · 5:00 PM',
-  },
-  {
-    id: 'l4',
-    name: 'Vikram Sethi',
-    source: 'YouTube description',
-    interest: 'Chartered Wealth Manager',
-    owner: 'Admissions',
-    status: 'Converted',
-    capturedAt: '6 Sep · 1:10 PM',
-  },
-];
-
-export const demoInbox: InboxItem[] = [
-  {
-    id: 'i1',
-    person: 'Rhea Kapoor',
-    channel: 'Instagram',
-    message: 'Could you send the CWM brochure and next batch dates?',
-    detectedKeyword: 'CWM',
-    status: 'Auto-response sent',
-  },
-  {
-    id: 'i2',
-    person: 'Aman Batra',
-    channel: 'LinkedIn',
-    message: 'Is the return shown in this post guaranteed?',
-    sensitive: true,
-    status: 'Needs reply',
-  },
-  {
-    id: 'i3',
-    person: 'Finance Club, Pune',
-    channel: 'Instagram',
-    message: 'We would like to explore a campus collaboration.',
-    status: 'Needs reply',
   },
 ];
 

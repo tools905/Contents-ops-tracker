@@ -1,8 +1,13 @@
 import type {
+  CadenceRun,
   ContentItem,
   DepartmentRequest,
+  OperatingCadence,
   Person,
+  RaciAssignment,
+  Stage,
 } from './content-types';
+import { PIPELINE } from './content-types';
 
 export const demoPeople: Person[] = [
   {
@@ -98,10 +103,25 @@ export const demoPeople: Person[] = [
   },
 ];
 
-const [ownerOne, priya, chhahal, harshit, piyush, kapil, jai, compliance] =
-  demoPeople;
+const [
+  ownerOne,
+  priya,
+  chhahal,
+  harshit,
+  piyush,
+  kapil,
+  jai,
+  compliance,
+  hods,
+  ownerTwo,
+] = demoPeople;
 
-export const demoItems: ContentItem[] = [
+type ContentItemBeforeRaci = Omit<
+  ContentItem,
+  'consulted' | 'informed' | 'raci'
+>;
+
+const demoItemsBeforeRaci: ContentItemBeforeRaci[] = [
   {
     id: 'c1',
     title: 'CWM: Career paths in private banking',
@@ -458,6 +478,192 @@ export const demoItems: ContentItem[] = [
     ],
   },
 ];
+
+const defaultRaci: Record<Stage, RaciAssignment> = {
+  Idea: {
+    responsible: [chhahal, harshit],
+    accountable: [priya],
+    consulted: [hods],
+    informed: [ownerOne, ownerTwo],
+  },
+  Script: {
+    responsible: [harshit, piyush],
+    accountable: [compliance, priya],
+    consulted: [hods],
+    informed: [chhahal],
+  },
+  Shoot: {
+    responsible: [jai, harshit],
+    accountable: [priya],
+    consulted: [piyush],
+    informed: [chhahal, ownerOne],
+  },
+  Production: {
+    responsible: [piyush, kapil],
+    accountable: [harshit, priya],
+    consulted: [compliance],
+    informed: [chhahal],
+  },
+  Upload: {
+    responsible: [chhahal],
+    accountable: [priya],
+    consulted: [harshit],
+    informed: [ownerOne, ownerTwo],
+  },
+  'Post-Upload Metrics': {
+    responsible: [chhahal],
+    accountable: [priya],
+    consulted: [harshit],
+    informed: [ownerOne, ownerTwo],
+  },
+};
+
+export const demoItems: ContentItem[] = demoItemsBeforeRaci.map((item) => {
+  const raci = Object.fromEntries(
+    PIPELINE.map((stage) => [
+      stage,
+      stage === item.stage
+        ? {
+            responsible: item.responsible,
+            accountable: item.accountable,
+            consulted: defaultRaci[stage].consulted,
+            informed: defaultRaci[stage].informed,
+          }
+        : defaultRaci[stage],
+    ]),
+  ) as Record<Stage, RaciAssignment>;
+  return {
+    ...item,
+    consulted: raci[item.stage].consulted,
+    informed: raci[item.stage].informed,
+    raci,
+  };
+});
+
+export const demoCadences: OperatingCadence[] = [
+  {
+    id: 'cad-6',
+    name: 'Script and compliance review',
+    purpose: 'Review technical accuracy, disclaimers and subject-matter inputs before recording.',
+    frequency: 'Weekly',
+    weekday: 2,
+    time: '11:30',
+    timezone: 'Asia/Kolkata',
+    owner: compliance,
+    participants: [priya, harshit, hods],
+    stage: 'Script',
+    deliverable: 'Compliance decisions and script revisions logged on each content item',
+    reminderHours: 24,
+    active: true,
+  },
+  {
+    id: 'cad-7',
+    name: 'Shoot and production handoff',
+    purpose: 'Confirm shoot briefs, recording capacity and edit dependencies.',
+    frequency: 'Weekly',
+    weekday: 3,
+    time: '10:30',
+    timezone: 'Asia/Kolkata',
+    owner: jai,
+    participants: [harshit, piyush, kapil],
+    stage: 'Shoot',
+    deliverable: 'Shoot plan and footage handoff ready for production',
+    reminderHours: 24,
+    active: true,
+  },
+  {
+    id: 'cad-8',
+    name: 'Publishing readiness check',
+    purpose: 'Check approved assets, platform schedules and published-link tracking.',
+    frequency: 'Weekly',
+    weekday: 5,
+    time: '10:00',
+    timezone: 'Asia/Kolkata',
+    owner: chhahal,
+    participants: [priya, harshit],
+    stage: 'Upload',
+    deliverable: 'Approved publishing slots with final files and tracked live links',
+    reminderHours: 24,
+    active: true,
+  },
+  {
+    id: 'cad-1',
+    name: 'Weekly content planning',
+    purpose: 'Confirm priorities, owners, dependencies and deadlines for the next seven days.',
+    frequency: 'Weekly',
+    weekday: 1,
+    time: '10:30',
+    timezone: 'Asia/Kolkata',
+    owner: priya,
+    participants: [chhahal, harshit, hods],
+    stage: 'Idea',
+    deliverable: 'Approved weekly priority list and updated content calendar',
+    reminderHours: 24,
+    active: true,
+  },
+  {
+    id: 'cad-2',
+    name: 'Approval and publishing readiness',
+    purpose: 'Clear compliance, creative and publishing blockers before the weekly release window.',
+    frequency: 'Weekly',
+    weekday: 4,
+    time: '15:30',
+    timezone: 'Asia/Kolkata',
+    owner: harshit,
+    participants: [priya, compliance, chhahal],
+    stage: 'Production',
+    deliverable: 'Decision log for every item due to publish in the next seven days',
+    reminderHours: 6,
+    active: true,
+  },
+  {
+    id: 'cad-3',
+    name: 'Weekly performance pulse',
+    purpose: 'Capture platform results, lessons and follow-up actions in the unified report.',
+    frequency: 'Weekly',
+    weekday: 5,
+    time: '16:30',
+    timezone: 'Asia/Kolkata',
+    owner: chhahal,
+    participants: [priya, harshit],
+    stage: 'Post-Upload Metrics',
+    deliverable: 'Weekly performance snapshot with learning notes',
+    reminderHours: 24,
+    active: true,
+  },
+  {
+    id: 'cad-4',
+    name: 'Monthly editorial calendar',
+    purpose: 'Lock next month’s topics, content mix and production capacity.',
+    frequency: 'Monthly',
+    dayOfMonth: 25,
+    time: '11:00',
+    timezone: 'Asia/Kolkata',
+    owner: priya,
+    participants: [chhahal, harshit, hods],
+    stage: 'Idea',
+    deliverable: 'Approved monthly calendar with the 60/20/20 content mix',
+    reminderHours: 48,
+    active: true,
+  },
+  {
+    id: 'cad-5',
+    name: 'Monthly content and analytics review',
+    purpose: 'Review content mix, platform performance and next-month experiments.',
+    frequency: 'Monthly',
+    dayOfMonth: 2,
+    time: '15:00',
+    timezone: 'Asia/Kolkata',
+    owner: chhahal,
+    participants: [priya, harshit, ownerOne, ownerTwo],
+    stage: 'Post-Upload Metrics',
+    deliverable: 'Monthly report, content-mix variance and three agreed experiments',
+    reminderHours: 48,
+    active: true,
+  },
+];
+
+export const demoCadenceRuns: CadenceRun[] = [];
 
 export const demoRequests: DepartmentRequest[] = [
   {

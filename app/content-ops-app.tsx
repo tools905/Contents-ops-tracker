@@ -104,17 +104,27 @@ import {
   TableRow,
 } from '@/components/ui/table';
 import { Textarea } from '@/components/ui/textarea';
-import { demoItems, demoPeople, demoRequests } from '@/lib/demo-data';
+import {
+  demoCadenceRuns,
+  demoCadences,
+  demoItems,
+  demoPeople,
+  demoRequests,
+} from '@/lib/demo-data';
 import {
   PIPELINE,
   PLATFORM_CONTENT_TYPES,
   STAGE_STEPS,
   type AppRole,
+  type CadenceFrequency,
+  type CadenceRun,
   type ContentItem,
   type ContentPillar,
   type DepartmentRequest,
   type MetricEntry,
+  type OperatingCadence,
   type Person,
+  type RaciAssignment,
   type Stage,
 } from '@/lib/content-types';
 import { makeSupabaseClient, type SupabaseConfig } from '@/lib/supabase-client';
@@ -123,13 +133,31 @@ import { loadLiveSnapshot } from '@/lib/supabase-data';
 type View =
   | 'today'
   | 'pipeline'
+  | 'raci'
   | 'calendar'
+  | 'cadence'
   | 'reports'
   | 'requests'
   | 'people'
   | 'settings';
 type MoveIntent = { item: ContentItem; toStage: Stage };
 type MetricDraft = Omit<MetricEntry, 'id' | 'source'>;
+type RaciIntent = { item: ContentItem; stage: Stage };
+type CadenceDraft = {
+  id?: string;
+  name: string;
+  purpose: string;
+  frequency: CadenceFrequency;
+  weekday?: number;
+  dayOfMonth?: number;
+  time: string;
+  ownerId: string;
+  participantIds: string[];
+  stage?: Stage;
+  deliverable: string;
+  reminderHours: number;
+  active: boolean;
+};
 const ROLE_PERSON: Record<AppRole, string> = {
   Owner: 'p1',
   Admin: 'p2',
@@ -163,7 +191,9 @@ const nav: Array<{ view: View; label: string; icon: typeof LayoutDashboard }> =
   [
     { view: 'today', label: 'Today', icon: LayoutDashboard },
     { view: 'pipeline', label: 'Content pipeline', icon: FileText },
+    { view: 'raci', label: 'RACI matrix', icon: ShieldCheck },
     { view: 'calendar', label: 'Calendar', icon: CalendarDays },
+    { view: 'cadence', label: 'Operating cadence', icon: RefreshCw },
     { view: 'reports', label: 'Reports', icon: BarChart3 },
     { view: 'requests', label: 'Content requests', icon: MessageSquareText },
     { view: 'people', label: 'People & access', icon: Users2 },
@@ -186,12 +216,19 @@ export default function ContentOpsApp({
   const [people, setPeople] = useState<Person[]>(demoPeople);
   const [items, setItems] = useState<ContentItem[]>(demoItems);
   const [requests, setRequests] = useState<DepartmentRequest[]>(demoRequests);
+  const [cadences, setCadences] = useState<OperatingCadence[]>(demoCadences);
+  const [cadenceRuns, setCadenceRuns] =
+    useState<CadenceRun[]>(demoCadenceRuns);
   const [currentUser, setCurrentUser] = useState<Person>(demoPeople[0]);
   const [currentRole, setCurrentRole] = useState<AppRole>('Owner');
   const [view, setView] = useState<View>('today');
   const [selectedId, setSelectedId] = useState<string>();
   const [createOpen, setCreateOpen] = useState(false);
   const [metricsOpen, setMetricsOpen] = useState(false);
+  const [raciIntent, setRaciIntent] = useState<RaciIntent>();
+  const [cadenceEditor, setCadenceEditor] = useState<
+    OperatingCadence | 'new'
+  >();
   const [theme, setTheme] = useState<'light' | 'dark' | 'system'>('system');
   const [overrideItem, setOverrideItem] = useState<ContentItem>();
   const [moveIntent, setMoveIntent] = useState<MoveIntent>();
@@ -204,6 +241,8 @@ export default function ContentOpsApp({
       setPeople(snapshot.people);
       setItems(snapshot.items);
       setRequests(snapshot.requests);
+      setCadences(snapshot.cadences);
+      setCadenceRuns(snapshot.cadenceRuns);
       setCurrentUser(snapshot.currentUser);
       setActiveProfile(snapshot.currentUserActive);
       if (snapshot.currentUser.roles.length)
@@ -286,6 +325,20 @@ export default function ContentOpsApp({
     'Admin',
     'Content Producer',
   ]);
+  const canManageOperations = hasAnyRole(effectiveRoles, ['Owner', 'Admin']);
+  const visibleCadences = useMemo(
+    () =>
+      canManageOperations || effectiveRoles.includes('Read-only Stakeholder')
+        ? cadences
+        : cadences.filter(
+            (cadence) =>
+              cadence.owner.id === rolePerson.id ||
+              cadence.participants.some(
+                (participant) => participant.id === rolePerson.id,
+              ),
+          ),
+    [cadences, canManageOperations, effectiveRoles, rolePerson.id],
+  );
   const visibleNav = nav
     .filter((entry) => entry.view !== 'people' || canManageAccess)
     .filter(
@@ -302,16 +355,18 @@ export default function ContentOpsApp({
     work: (supabase: SupabaseClient) => Promise<unknown>,
     success: string,
   ) => {
-    if (!client || !authUser) return;
+    if (!client || !authUser) return false;
     setBusy(true);
     try {
       await work(client);
       await reloadLive(client, authUser);
       showNotice(success);
+      return true;
     } catch (error) {
       showNotice(
         error instanceof Error ? error.message : 'Something went wrong',
       );
+      return false;
     } finally {
       setBusy(false);
     }
@@ -364,6 +419,7 @@ export default function ContentOpsApp({
           ? {
               ...row,
               stage: last ? row.stage : PIPELINE[index + 1],
+              ...raciFor(row, last ? row.stage : PIPELINE[index + 1]),
               workflowStep: last
                 ? row.workflowStep
                 : STAGE_STEPS[PIPELINE[index + 1]][0],
@@ -686,53 +742,60 @@ export default function ContentOpsApp({
     dueAt: string;
     responsibleId: string;
     accountableIds: string[];
+    consultedIds: string[];
+    informedIds: string[];
     copyOwners: boolean;
   }) => {
     const creator = rolePerson;
-    if (!demoMode)
-      return mutateLive(async (supabase) => {
-        const { data, error } = await supabase
-          .from('content_items')
-          .insert({
-            title: draft.title,
-            content_type: draft.contentType,
-            platform: draft.platform,
-            content_pillar: pillarToDb[draft.pillar],
-            workflow_step: STAGE_STEPS.Idea[0],
-            due_at: draft.dueAt || null,
-            created_by: authUser!.id,
-          })
-          .select('id')
-          .single();
+    if (!demoMode) {
+      const saved = await mutateLive(async (supabase) => {
+        const { error } = await supabase.rpc('create_content_with_raci', {
+          p_title: draft.title,
+          p_content_type: draft.contentType,
+          p_platform: draft.platform,
+          p_pillar: pillarToDb[draft.pillar],
+          p_due_at: draft.dueAt ? new Date(`${draft.dueAt}:00+05:30`).toISOString() : null,
+          p_responsible_id: draft.responsibleId,
+          p_accountable_ids: draft.accountableIds,
+          p_consulted_ids: draft.consultedIds,
+          p_informed_ids: draft.informedIds,
+          p_copy_all_stages: draft.copyOwners,
+        });
         if (error) throw error;
-        const assignmentStages = draft.copyOwners
-          ? PIPELINE
-          : (['Idea'] as const);
-        const assignments = assignmentStages.flatMap((stage) => [
-          {
-            content_item_id: data.id,
-            stage: stageToDb[stage],
-            profile_id: draft.responsibleId,
-            assignment_type: 'responsible',
-          },
-          ...draft.accountableIds.map((profileId) => ({
-            content_item_id: data.id,
-            stage: stageToDb[stage],
-            profile_id: profileId,
-            assignment_type: 'accountable',
-          })),
-        ]);
-        const { error: assignmentError } = await supabase
-          .from('item_stage_assignments')
-          .insert(assignments);
-        if (assignmentError) throw assignmentError;
       }, 'Content item created.');
+      if (saved) setCreateOpen(false);
+      return;
+    }
     const responsible = people.filter(
       (person) => person.id === draft.responsibleId,
     );
     const accountable = people.filter((person) =>
       draft.accountableIds.includes(person.id),
     );
+    const consulted = people.filter((person) =>
+      draft.consultedIds.includes(person.id),
+    );
+    const informed = people.filter((person) =>
+      draft.informedIds.includes(person.id),
+    );
+    const assignment: RaciAssignment = {
+      responsible,
+      accountable,
+      consulted,
+      informed,
+    };
+    const emptyAssignment: RaciAssignment = {
+      responsible: [],
+      accountable: [],
+      consulted: [],
+      informed: [],
+    };
+    const raci = Object.fromEntries(
+      PIPELINE.map((stage) => [
+        stage,
+        draft.copyOwners || stage === 'Idea' ? assignment : emptyAssignment,
+      ]),
+    ) as Record<Stage, RaciAssignment>;
     setItems((all) => [
       {
         id: crypto.randomUUID(),
@@ -743,11 +806,14 @@ export default function ContentOpsApp({
         workflowStep: STAGE_STEPS.Idea[0],
         stage: 'Idea',
         status: 'In progress',
-        dueAt: draft.dueAt ? new Date(draft.dueAt).toISOString() : undefined,
+        dueAt: draft.dueAt ? new Date(`${draft.dueAt}:00+05:30`).toISOString() : undefined,
         reminderHours: 24,
         lifecycle: 'Active',
         responsible,
         accountable,
+        consulted,
+        informed,
+        raci,
         secondLens: 'Not needed',
         links: [],
         comments: [],
@@ -784,6 +850,167 @@ export default function ContentOpsApp({
       ...all,
     ]);
     showNotice('Content request submitted.');
+  };
+
+  const saveRaci = async (
+    item: ContentItem,
+    stage: Stage,
+    assignment: RaciAssignment,
+  ) => {
+    if (!demoMode) {
+      const saved = await mutateLive(async (supabase) => {
+        const { error } = await supabase.rpc('replace_stage_raci', {
+          p_item_id: item.id,
+          p_stage: stageToDb[stage],
+          p_responsible_ids: assignment.responsible.map((person) => person.id),
+          p_accountable_ids: assignment.accountable.map((person) => person.id),
+          p_consulted_ids: assignment.consulted.map((person) => person.id),
+          p_informed_ids: assignment.informed.map((person) => person.id),
+        });
+        if (error) throw error;
+      }, `${stage} RACI updated.`);
+      if (saved) setRaciIntent(undefined);
+      return;
+    }
+    setItems((all) =>
+      all.map((row) =>
+        row.id === item.id
+          ? {
+              ...row,
+              raci: { ...row.raci, [stage]: assignment },
+              ...(row.stage === stage
+                ? {
+                    responsible: assignment.responsible,
+                    accountable: assignment.accountable,
+                    consulted: assignment.consulted,
+                    informed: assignment.informed,
+                  }
+                : {}),
+              history: [
+                ...row.history,
+                {
+                  action: `${stage} RACI updated`,
+                  actor: rolePerson.name,
+                  at: 'Just now',
+                },
+              ],
+            }
+          : row,
+      ),
+    );
+    setRaciIntent(undefined);
+    showNotice(`${stage} RACI updated.`);
+  };
+
+  const saveCadence = async (draft: CadenceDraft) => {
+    const owner = people.find((person) => person.id === draft.ownerId);
+    if (!owner) return showNotice('Choose a cadence owner.');
+    const participants = people.filter((person) =>
+      draft.participantIds.includes(person.id),
+    );
+    if (!demoMode) {
+      const saved = await mutateLive(async (supabase) => {
+        const { error } = await supabase.rpc('save_operating_cadence', {
+          p_cadence_id: draft.id ?? null,
+          p_name: draft.name,
+          p_purpose: draft.purpose,
+          p_frequency: draft.frequency.toLowerCase(),
+          p_weekday: draft.frequency === 'Weekly' ? draft.weekday : null,
+          p_day_of_month: draft.frequency === 'Monthly' ? draft.dayOfMonth : null,
+          p_time: draft.time,
+          p_owner_id: draft.ownerId,
+          p_stage: draft.stage ? stageToDb[draft.stage] : null,
+          p_deliverable: draft.deliverable,
+          p_reminder_hours: draft.reminderHours,
+          p_is_active: draft.active,
+          p_participant_ids: draft.participantIds,
+        });
+        if (error) throw error;
+      }, draft.id ? 'Cadence updated.' : 'Recurring cadence created.');
+      if (saved) setCadenceEditor(undefined);
+      return;
+    }
+
+    const next: OperatingCadence = {
+      id: draft.id ?? crypto.randomUUID(),
+      name: draft.name,
+      purpose: draft.purpose,
+      frequency: draft.frequency,
+      weekday: draft.frequency === 'Weekly' ? draft.weekday : undefined,
+      dayOfMonth:
+        draft.frequency === 'Monthly' ? draft.dayOfMonth : undefined,
+      time: draft.time,
+      timezone: 'Asia/Kolkata',
+      owner,
+      participants,
+      stage: draft.stage,
+      deliverable: draft.deliverable,
+      reminderHours: draft.reminderHours,
+      active: draft.active,
+    };
+    setCadences((all) =>
+      draft.id
+        ? all.map((cadence) => (cadence.id === draft.id ? next : cadence))
+        : [...all, next],
+    );
+    setCadenceEditor(undefined);
+    showNotice(draft.id ? 'Cadence updated.' : 'Recurring cadence created.');
+  };
+
+  const toggleCadence = async (cadence: OperatingCadence) => {
+    if (!demoMode)
+      return mutateLive(async (supabase) => {
+        const { error } = await supabase
+          .from('operating_cadences')
+          .update({ is_active: !cadence.active })
+          .eq('id', cadence.id);
+        if (error) throw error;
+      }, cadence.active ? 'Cadence paused.' : 'Cadence activated.');
+    setCadences((all) =>
+      all.map((entry) =>
+        entry.id === cadence.id
+          ? { ...entry, active: !entry.active }
+          : entry,
+      ),
+    );
+    showNotice(cadence.active ? 'Cadence paused.' : 'Cadence activated.');
+  };
+
+  const completeCadenceRun = async (
+    cadence: OperatingCadence,
+    scheduledFor: string,
+  ) => {
+    if (!demoMode)
+      return mutateLive(async (supabase) => {
+        const { error } = await supabase.from('cadence_runs').upsert(
+          {
+            cadence_id: cadence.id,
+            scheduled_for: scheduledFor,
+            status: 'complete',
+            completed_by: authUser!.id,
+            completed_at: new Date().toISOString(),
+          },
+          { onConflict: 'cadence_id,scheduled_for' },
+        );
+        if (error) throw error;
+      }, 'Cadence occurrence completed.');
+    setCadenceRuns((all) => [
+      ...all.filter(
+        (run) =>
+          !(
+            run.cadenceId === cadence.id &&
+            run.scheduledFor === scheduledFor
+          ),
+      ),
+      {
+        cadenceId: cadence.id,
+        scheduledFor,
+        status: 'Complete',
+        completedAt: new Date().toISOString(),
+        completedBy: rolePerson,
+      },
+    ]);
+    showNotice('Cadence occurrence completed.');
   };
 
   useEffect(() => {
@@ -1071,6 +1298,8 @@ export default function ContentOpsApp({
               items={visibleItems}
               actions={myActions}
               roles={effectiveRoles}
+              cadences={visibleCadences}
+              cadenceRuns={cadenceRuns}
               onOpen={(id) => setSelectedId(id)}
               onReview={secondLensReview}
               onSaveMetric={addMetric}
@@ -1086,10 +1315,32 @@ export default function ContentOpsApp({
               onMove={requestMove}
             />
           )}
+          {view === 'raci' && (
+            <RaciMatrix
+              items={visibleItems}
+              canManage={canManageOperations}
+              onEdit={(item, stage) => setRaciIntent({ item, stage })}
+              onOpen={(id) => setSelectedId(id)}
+            />
+          )}
           {view === 'calendar' && (
             <ContentCalendar
               items={visibleItems}
+              cadences={visibleCadences}
+              cadenceRuns={cadenceRuns}
               onOpen={(id) => setSelectedId(id)}
+            />
+          )}
+          {view === 'cadence' && (
+            <OperatingCadenceView
+              cadences={visibleCadences}
+              cadenceRuns={cadenceRuns}
+              canManage={canManageOperations}
+              currentPerson={rolePerson}
+              onCreate={() => setCadenceEditor('new')}
+              onEdit={(cadence) => setCadenceEditor(cadence)}
+              onToggle={toggleCadence}
+              onComplete={completeCadenceRun}
             />
           )}
           {view === 'reports' && (
@@ -1147,6 +1398,18 @@ export default function ContentOpsApp({
         onComment={addComment}
         onMetric={addMetric}
       />
+      <RaciDialog
+        intent={raciIntent}
+        people={people}
+        onOpenChange={(open) => !open && setRaciIntent(undefined)}
+        onSave={saveRaci}
+      />
+      <CadenceDialog
+        cadence={cadenceEditor}
+        people={people}
+        onOpenChange={(open) => !open && setCadenceEditor(undefined)}
+        onSave={saveCadence}
+      />
       <OverrideDialog
         item={overrideItem}
         onOpenChange={(open) => !open && setOverrideItem(undefined)}
@@ -1179,18 +1442,22 @@ function dashboardScope(roles: AppRole[]) {
 function isAssigned(
   item: ContentItem,
   person: Person,
-  kind: 'responsible' | 'accountable' | 'either' = 'either',
+  kind: 'responsible' | 'accountable' | 'consulted' | 'informed' | 'either' = 'either',
 ) {
   const assigned =
     kind === 'responsible'
       ? item.responsible
       : kind === 'accountable'
         ? item.accountable
-        : [...item.responsible, ...item.accountable];
+        : kind === 'consulted'
+          ? item.consulted
+          : kind === 'informed'
+            ? item.informed
+            : [...item.responsible, ...item.accountable, ...item.consulted, ...item.informed];
   return assigned.some((owner) => owner.id === person.id);
 }
 function canSubmitItem(item: ContentItem, roles: AppRole[], person: Person) {
-  return hasAnyRole(roles, ['Owner', 'Admin']) || isAssigned(item, person);
+  return hasAnyRole(roles, ['Owner', 'Admin']) || isAssigned(item, person, 'responsible');
 }
 function canApproveItem(item: ContentItem, roles: AppRole[], person: Person) {
   return (
@@ -1217,7 +1484,7 @@ function filterForRoles(
 
 type ActionItem = {
   item: ContentItem;
-  kind: 'approval' | 'second-lens' | 'metrics' | 'work';
+  kind: 'approval' | 'second-lens' | 'metrics' | 'work' | 'consultation';
   label: string;
   priority: number;
 };
@@ -1229,6 +1496,13 @@ function getMyActions(
   const elevated = hasAnyRole(roles, ['Owner', 'Admin']);
   const actions: ActionItem[] = [];
   for (const item of items.filter((row) => row.lifecycle === 'Active')) {
+    if (isAssigned(item, person, 'consulted'))
+      actions.push({
+        item,
+        kind: 'consultation',
+        label: 'Provide your input before approval',
+        priority: 2,
+      });
     if (
       item.status === 'Pending approval' &&
       (elevated || isAssigned(item, person, 'accountable'))
@@ -1301,6 +1575,83 @@ function dueLabel(item: ContentItem) {
 }
 function stagePercent(stage: Stage) {
   return ((PIPELINE.indexOf(stage) + 1) / PIPELINE.length) * 100;
+}
+function raciFor(item: ContentItem, stage: Stage): RaciAssignment {
+  return (
+    item.raci?.[stage] ??
+    (stage === item.stage
+      ? {
+          responsible: item.responsible,
+          accountable: item.accountable,
+          consulted: item.consulted,
+          informed: item.informed,
+        }
+      : { responsible: [], accountable: [], consulted: [], informed: [] })
+  );
+}
+function localDateKey(date: Date) {
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Kolkata',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).formatToParts(date);
+  const value = (type: string) =>
+    parts.find((part) => part.type === type)?.value ?? '';
+  return `${value('year')}-${value('month')}-${value('day')}`;
+}
+function getCadenceOccurrences(cadences: OperatingCadence[], days: number) {
+  const now = Date.now();
+  const occurrences: Array<{
+    cadence: OperatingCadence;
+    scheduledFor: string;
+  }> = [];
+  for (let offset = 0; offset <= days; offset += 1) {
+    const date = new Date(now + offset * 24 * 3600_000);
+    const key = localDateKey(date);
+    const noon = new Date(`${key}T12:00:00+05:30`);
+    const dayOfWeek = noon.getUTCDay();
+    const dayOfMonth = Number(key.slice(-2));
+    for (const cadence of cadences.filter((entry) => entry.active)) {
+      const matches =
+        (cadence.frequency === 'Weekly' && cadence.weekday === dayOfWeek) ||
+        (cadence.frequency === 'Monthly' &&
+          cadence.dayOfMonth === dayOfMonth);
+      if (!matches) continue;
+      const scheduledFor = new Date(
+        `${key}T${cadence.time}:00+05:30`,
+      ).toISOString();
+      if (new Date(scheduledFor).getTime() >= now - 60 * 60_000)
+        occurrences.push({ cadence, scheduledFor });
+    }
+  }
+  return occurrences.sort((a, b) =>
+    a.scheduledFor.localeCompare(b.scheduledFor),
+  );
+}
+function formatCadenceDate(value: string) {
+  return new Intl.DateTimeFormat('en-IN', {
+    timeZone: 'Asia/Kolkata',
+    weekday: 'short',
+    day: 'numeric',
+    month: 'short',
+    hour: 'numeric',
+    minute: '2-digit',
+  }).format(new Date(value));
+}
+function cadenceScheduleLabel(cadence: OperatingCadence) {
+  const weekdays = [
+    'Sunday',
+    'Monday',
+    'Tuesday',
+    'Wednesday',
+    'Thursday',
+    'Friday',
+    'Saturday',
+  ];
+  return cadence.frequency === 'Weekly'
+    ? `Every ${weekdays[cadence.weekday ?? 1]} at ${cadence.time}`
+    : `Day ${cadence.dayOfMonth ?? 1} monthly at ${cadence.time}`;
 }
 function LogoMonogram() {
   return (
@@ -1440,6 +1791,8 @@ function Today({
   items,
   actions,
   roles,
+  cadences,
+  cadenceRuns,
   onOpen,
   onReview,
   onSaveMetric,
@@ -1448,6 +1801,8 @@ function Today({
   items: ContentItem[];
   actions: ActionItem[];
   roles: AppRole[];
+  cadences: OperatingCadence[];
+  cadenceRuns: CadenceRun[];
   onOpen: (id: string) => void;
   onReview: (item: ContentItem, approved: boolean, note: string) => void;
   onSaveMetric: (
@@ -1460,7 +1815,7 @@ function Today({
   const approvals = actions.filter(
     (action) => action.kind === 'approval' || action.kind === 'second-lens',
   );
-  const assigned = actions.filter((action) => action.kind === 'work');
+  const assigned = actions.filter((action) => action.kind === 'work' || action.kind === 'consultation');
   const metrics = actions.filter((action) => action.kind === 'metrics');
   const overdue = active.filter(isOverdue);
   return (
@@ -1536,7 +1891,7 @@ function Today({
           </Card>
           <Card className="bg-card">
             <CardHeader>
-              <CardTitle>Your production work</CardTitle>
+              <CardTitle>Your work and input</CardTitle>
               <CardDescription>
                 Work assigned to you, ordered by urgency.
               </CardDescription>
@@ -1552,7 +1907,7 @@ function Today({
                   />
                 ))
               ) : (
-                <EmptyState text="No production tasks are waiting on you." />
+                <EmptyState text="No work or consultations are waiting on you." />
               )}
             </CardContent>
           </Card>
@@ -1578,6 +1933,24 @@ function Today({
           )}
         </div>
         <div className="space-y-5">
+          <Card className="bg-card">
+            <CardHeader>
+              <CardTitle>Next operating checkpoint</CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-3">
+              {getCadenceOccurrences(cadences, 30)
+                .filter(({ cadence, scheduledFor }) => !cadenceRuns.some((run) => run.cadenceId === cadence.id && run.scheduledFor === scheduledFor && run.status === 'Complete'))
+                .slice(0, 1)
+                .map(({ cadence, scheduledFor }) => (
+                  <div key={cadence.id}>
+                    <p className="text-sm font-semibold">{cadence.name}</p>
+                    <p className="mt-1 text-sm text-muted-foreground">{formatCadenceDate(scheduledFor)}</p>
+                    <p className="mt-2 text-sm text-muted-foreground">{cadence.deliverable}</p>
+                  </div>
+                ))}
+              <Button variant="outline" onClick={() => setView('cadence')}>Open cadence <ChevronRight /></Button>
+            </CardContent>
+          </Card>
           <Card className="bg-[#202546] text-white ring-0">
             <CardHeader>
               <CardTitle>Pipeline pulse</CardTitle>
@@ -1900,25 +2273,193 @@ function Pipeline({
   );
 }
 
-function ContentCalendar({
+function RaciMatrix({
   items,
+  canManage,
+  onEdit,
   onOpen,
 }: {
   items: ContentItem[];
+  canManage: boolean;
+  onEdit: (item: ContentItem, stage: Stage) => void;
+  onOpen: (id: string) => void;
+}) {
+  const [selectedId, setSelectedId] = useState(items[0]?.id ?? '');
+  const item = items.find((entry) => entry.id === selectedId) ?? items[0];
+  const allAssignments = items.flatMap((entry) =>
+    PIPELINE.flatMap((stage) => {
+      const assignment = raciFor(entry, stage);
+      return [
+        assignment.responsible.length,
+        assignment.accountable.length,
+        assignment.consulted.length,
+        assignment.informed.length,
+      ];
+    }),
+  );
+  const completeSlots = allAssignments.filter(Boolean).length;
+  const totalSlots = Math.max(1, allAssignments.length);
+  const coverage = Math.round((completeSlots / totalSlots) * 100);
+  const incompleteStages = items.reduce(
+    (sum, entry) =>
+      sum +
+      PIPELINE.filter((stage) => {
+        const assignment = raciFor(entry, stage);
+        return (
+          !assignment.responsible.length ||
+          !assignment.accountable.length ||
+          !assignment.consulted.length ||
+          !assignment.informed.length
+        );
+      }).length,
+    0,
+  );
+  return (
+    <>
+      <PageTitle
+        eyebrow="RACI OWNERSHIP"
+        title="One accountable map for every handoff."
+        description="Compare who does the work, owns the decision, gives input and stays informed across all six stages."
+      />
+      <section className="mb-5 grid gap-4 sm:grid-cols-3">
+        <MetricCard
+          label="RACI coverage"
+          value={`${coverage}%`}
+          detail={`${completeSlots} of ${totalSlots} role slots assigned`}
+          icon={ShieldCheck}
+          accent
+        />
+        <MetricCard
+          label="Stage maps"
+          value={String(items.length * PIPELINE.length)}
+          detail="Six explicit maps per content item"
+          icon={FileCheck2}
+        />
+        <MetricCard
+          label="Gaps to resolve"
+          value={String(incompleteStages)}
+          detail="Stages missing at least one RACI role"
+          icon={AlertTriangle}
+        />
+      </section>
+      <Card className="bg-card">
+        <CardHeader className="gap-4 lg:flex-row lg:items-end lg:justify-between">
+          <div>
+            <CardTitle>Stage-by-stage comparison</CardTitle>
+            <CardDescription>
+              Responsible and Accountable are required; Consulted and Informed make collaboration explicit.
+            </CardDescription>
+          </div>
+          {items.length > 0 && (
+            <NativeSelect
+              aria-label="Choose content item for RACI comparison"
+              className="w-full bg-card lg:w-[360px]"
+              value={item?.id}
+              onChange={(event) => setSelectedId(event.target.value)}
+            >
+              {items.map((entry) => (
+                <NativeSelectOption key={entry.id} value={entry.id}>
+                  {entry.title}
+                </NativeSelectOption>
+              ))}
+            </NativeSelect>
+          )}
+        </CardHeader>
+        <CardContent className="overflow-x-auto px-0 sm:px-4">
+          {item ? (
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>Stage</TableHead>
+                  <TableHead>R · Responsible</TableHead>
+                  <TableHead>A · Accountable</TableHead>
+                  <TableHead>C · Consulted</TableHead>
+                  <TableHead>I · Informed</TableHead>
+                  <TableHead className="text-right">Action</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {PIPELINE.map((stage) => {
+                  const assignment = raciFor(item, stage);
+                  const complete = Object.values(assignment).every(
+                    (people) => people.length > 0,
+                  );
+                  return (
+                    <TableRow key={stage}>
+                      <TableCell className="min-w-44">
+                        <button
+                          className="text-left"
+                          onClick={() => onOpen(item.id)}
+                        >
+                          <p className="font-semibold">{stage}</p>
+                          <p className="mt-1 text-xs text-muted-foreground">
+                            {stage === item.stage ? 'Current stage' : STAGE_STEPS[stage][0]}
+                          </p>
+                        </button>
+                      </TableCell>
+                      <TableCell><RaciPeople people={assignment.responsible} /></TableCell>
+                      <TableCell><RaciPeople people={assignment.accountable} /></TableCell>
+                      <TableCell><RaciPeople people={assignment.consulted} /></TableCell>
+                      <TableCell><RaciPeople people={assignment.informed} /></TableCell>
+                      <TableCell className="min-w-28 text-right">
+                        {canManage ? (
+                          <Button variant="outline" size="sm" onClick={() => onEdit(item, stage)}>
+                            Edit
+                          </Button>
+                        ) : (
+                          <Badge variant={complete ? 'secondary' : 'destructive'}>
+                            {complete ? 'Complete' : 'Gap'}
+                          </Badge>
+                        )}
+                      </TableCell>
+                    </TableRow>
+                  );
+                })}
+              </TableBody>
+            </Table>
+          ) : (
+            <EmptyState text="Create a content item to build its RACI map." />
+          )}
+        </CardContent>
+      </Card>
+    </>
+  );
+}
+
+function RaciPeople({ people }: { people: Person[] }) {
+  return people.length ? (
+    <div className="flex min-w-40 flex-wrap gap-1.5">
+      {people.map((person) => (
+        <Badge key={person.id} variant="outline" className="bg-card font-normal">
+          {person.name}
+        </Badge>
+      ))}
+    </div>
+  ) : (
+    <Badge variant="destructive">Unassigned</Badge>
+  );
+}
+
+function ContentCalendar({
+  items,
+  cadences,
+  cadenceRuns,
+  onOpen,
+}: {
+  items: ContentItem[];
+  cadences: OperatingCadence[];
+  cadenceRuns: CadenceRun[];
   onOpen: (id: string) => void;
 }) {
   const scheduled = [...items]
     .filter((item) => item.lifecycle === 'Active' && item.dueAt)
     .sort((a, b) => (a.dueAt ?? '').localeCompare(b.dueAt ?? ''));
-  const dayKeys = [
-    '2026-09-11',
-    '2026-09-12',
-    '2026-09-13',
-    '2026-09-14',
-    '2026-09-15',
-    '2026-09-16',
-    '2026-09-17',
-  ];
+  const dayKeys = Array.from({ length: 7 }, (_, index) => {
+    const date = new Date();
+    date.setDate(date.getDate() + index);
+    return localDateKey(date);
+  });
+  const upcomingCadence = getCadenceOccurrences(cadences, 14).slice(0, 8);
   return (
     <>
       <PageTitle
@@ -2010,6 +2551,268 @@ function ContentCalendar({
                   <TableCell>
                     <Owners people={item.responsible} />
                   </TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        </CardContent>
+      </Card>
+      <Card className="mt-5 bg-card">
+        <CardHeader>
+          <CardTitle>Operating cadence</CardTitle>
+          <CardDescription>
+            Recurring planning, approvals and reporting alongside content deadlines
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="grid gap-3 md:grid-cols-2">
+          {upcomingCadence.map(({ cadence, scheduledFor }) => {
+            const run = cadenceRuns.find(
+              (entry) =>
+                entry.cadenceId === cadence.id &&
+                entry.scheduledFor === scheduledFor,
+            );
+            return (
+              <div
+                key={`${cadence.id}-${scheduledFor}`}
+                className="flex items-start justify-between gap-4 rounded-xl border border-border p-3.5"
+              >
+                <div>
+                  <p className="text-sm font-semibold">{cadence.name}</p>
+                  <p className="mt-1 text-xs text-muted-foreground">
+                    {formatCadenceDate(scheduledFor)} · {cadence.owner.name}
+                  </p>
+                </div>
+                <Badge variant={run?.status === 'Complete' ? 'secondary' : 'outline'}>
+                  {run?.status ?? 'Upcoming'}
+                </Badge>
+              </div>
+            );
+          })}
+          {!upcomingCadence.length && (
+            <EmptyState text="No recurring cadence is active for the next two weeks." />
+          )}
+        </CardContent>
+      </Card>
+    </>
+  );
+}
+
+function OperatingCadenceView({
+  cadences,
+  cadenceRuns,
+  canManage,
+  currentPerson,
+  onCreate,
+  onEdit,
+  onToggle,
+  onComplete,
+}: {
+  cadences: OperatingCadence[];
+  cadenceRuns: CadenceRun[];
+  canManage: boolean;
+  currentPerson: Person;
+  onCreate: () => void;
+  onEdit: (cadence: OperatingCadence) => void;
+  onToggle: (cadence: OperatingCadence) => void;
+  onComplete: (cadence: OperatingCadence, scheduledFor: string) => void;
+}) {
+  const occurrences = getCadenceOccurrences(cadences, 45);
+  const upcoming = occurrences.slice(0, 10);
+  const completed = cadenceRuns.filter((run) => run.status === 'Complete').length;
+  const thisWeek = occurrences.filter(
+    ({ scheduledFor }) =>
+      new Date(scheduledFor).getTime() <= Date.now() + 7 * 24 * 3600_000,
+  ).length;
+  const stageCoverage = new Set(
+    cadences.filter((cadence) => cadence.active && cadence.stage).map((cadence) => cadence.stage),
+  ).size;
+  return (
+    <>
+      <PageTitle
+        eyebrow="OPERATING CADENCE"
+        title="The team rhythm is visible and repeatable."
+        description="Plan content, clear approvals, publish on time and close the reporting loop through recurring weekly and monthly checkpoints."
+        action={
+          canManage ? (
+            <Button onClick={onCreate}>
+              <Plus /> Add recurring cadence
+            </Button>
+          ) : undefined
+        }
+      />
+      <section className="mb-5 grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+        <MetricCard
+          label="Active cadences"
+          value={String(cadences.filter((cadence) => cadence.active).length)}
+          detail={`${cadences.filter((cadence) => cadence.frequency === 'Weekly' && cadence.active).length} weekly · ${cadences.filter((cadence) => cadence.frequency === 'Monthly' && cadence.active).length} monthly`}
+          icon={RefreshCw}
+          accent
+        />
+        <MetricCard
+          label="Next 7 days"
+          value={String(thisWeek)}
+          detail="Recurring checkpoints due"
+          icon={CalendarDays}
+        />
+        <MetricCard
+          label="Stage coverage"
+          value={`${stageCoverage}/${PIPELINE.length}`}
+          detail="Pipeline stages linked to a cadence"
+          icon={FileCheck2}
+        />
+        <MetricCard
+          label="Completed"
+          value={String(completed)}
+          detail="Recorded cadence occurrences"
+          icon={CheckCircle2}
+        />
+      </section>
+
+      <section className="grid gap-5 xl:grid-cols-[.9fr_1.1fr]">
+        <Card className="bg-card">
+          <CardHeader>
+            <CardTitle>Next checkpoints</CardTitle>
+            <CardDescription>
+              Generated automatically from active recurrence rules in Asia/Kolkata
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            {upcoming.map(({ cadence, scheduledFor }) => {
+              const run = cadenceRuns.find(
+                (entry) =>
+                  entry.cadenceId === cadence.id &&
+                  entry.scheduledFor === scheduledFor,
+              );
+              const canComplete =
+                canManage ||
+                cadence.owner.id === currentPerson.id ||
+                cadence.participants.some(
+                  (participant) => participant.id === currentPerson.id,
+                );
+              return (
+                <div
+                  key={`${cadence.id}-${scheduledFor}`}
+                  className="rounded-xl border border-border p-4"
+                >
+                  <div className="flex flex-wrap items-start justify-between gap-3">
+                    <div>
+                      <div className="flex flex-wrap items-center gap-2">
+                        <p className="text-sm font-semibold">{cadence.name}</p>
+                        {cadence.stage && <Badge variant="outline">{cadence.stage}</Badge>}
+                      </div>
+                      <p className="mt-1 text-xs text-muted-foreground">
+                        {formatCadenceDate(scheduledFor)} · Owner {cadence.owner.name}
+                      </p>
+                    </div>
+                    {run?.status === 'Complete' ? (
+                      <Badge className="bg-[#e7f4ed] text-[#276749]">Complete</Badge>
+                    ) : canComplete ? (
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onClick={() => onComplete(cadence, scheduledFor)}
+                      >
+                        <Check /> Mark complete
+                      </Button>
+                    ) : (
+                      <Badge variant="secondary">Upcoming</Badge>
+                    )}
+                  </div>
+                  <p className="mt-3 text-sm text-muted-foreground">
+                    <strong className="text-card-foreground">Deliverable:</strong>{' '}
+                    {cadence.deliverable}
+                  </p>
+                </div>
+              );
+            })}
+            {!upcoming.length && <EmptyState text="No active cadence is scheduled." />}
+          </CardContent>
+        </Card>
+
+        <Card className="bg-card">
+          <CardHeader>
+            <CardTitle>Operating loop</CardTitle>
+            <CardDescription>
+              The minimum recurring rhythm drawn from the content team brief
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            {[
+              ['Plan', 'Research, HOD input and weekly/monthly calendar decisions', 'Idea'],
+              ['Approve', 'Compliance, quality control and final brand approval', 'Production'],
+              ['Publish', 'Platform readiness, live links and owner handoff', 'Upload'],
+              ['Learn', 'Weekly pulse, monthly analytics and learning notes', 'Post-Upload Metrics'],
+            ].map(([label, detail, stage], index) => {
+              const linked = cadences.filter(
+                (cadence) => cadence.active && cadence.stage === stage,
+              );
+              return (
+                <div key={label} className="flex gap-4 rounded-xl bg-muted p-4">
+                  <span className="grid size-8 shrink-0 place-items-center rounded-full bg-[#1f2342] text-xs font-bold text-white">
+                    {index + 1}
+                  </span>
+                  <div>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <p className="text-sm font-semibold">{label}</p>
+                      <Badge variant={linked.length ? 'secondary' : 'destructive'}>
+                        {linked.length ? `${linked.length} linked` : 'Needs cadence'}
+                      </Badge>
+                    </div>
+                    <p className="mt-1 text-sm text-muted-foreground">{detail}</p>
+                  </div>
+                </div>
+              );
+            })}
+          </CardContent>
+        </Card>
+      </section>
+
+      <Card className="mt-5 bg-card">
+        <CardHeader>
+          <CardTitle>Recurring cadence configuration</CardTitle>
+          <CardDescription>
+            Admins control recurrence, owners, participants, reminders and deliverables.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="overflow-x-auto px-0 sm:px-4">
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead>Cadence</TableHead>
+                <TableHead>Recurrence</TableHead>
+                <TableHead>Owner</TableHead>
+                <TableHead>Participants</TableHead>
+                <TableHead>Reminder</TableHead>
+                <TableHead>Status</TableHead>
+                {canManage && <TableHead className="text-right">Actions</TableHead>}
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {cadences.map((cadence) => (
+                <TableRow key={cadence.id}>
+                  <TableCell className="min-w-64">
+                    <p className="font-semibold">{cadence.name}</p>
+                    <p className="mt-1 text-xs text-muted-foreground">{cadence.deliverable}</p>
+                  </TableCell>
+                  <TableCell className="min-w-44">{cadenceScheduleLabel(cadence)}</TableCell>
+                  <TableCell>{cadence.owner.name}</TableCell>
+                  <TableCell><Owners people={cadence.participants} /></TableCell>
+                  <TableCell>{cadence.reminderHours}h before</TableCell>
+                  <TableCell>
+                    <Badge variant={cadence.active ? 'secondary' : 'outline'}>
+                      {cadence.active ? 'Active' : 'Paused'}
+                    </Badge>
+                  </TableCell>
+                  {canManage && (
+                    <TableCell className="text-right">
+                      <div className="flex justify-end gap-2">
+                        <Button size="sm" variant="outline" onClick={() => onEdit(cadence)}>Edit</Button>
+                        <Button size="sm" variant="ghost" onClick={() => onToggle(cadence)}>
+                          {cadence.active ? 'Pause' : 'Activate'}
+                        </Button>
+                      </div>
+                    </TableCell>
+                  )}
                 </TableRow>
               ))}
             </TableBody>
@@ -2382,7 +3185,7 @@ function MyActions({
   ) => void;
 }) {
   const direct = actions.filter(
-    (action) => action.kind === 'approval' || action.kind === 'work',
+    (action) => action.kind === 'approval' || action.kind === 'work' || action.kind === 'consultation',
   );
   const reviews = actions.filter((action) => action.kind === 'second-lens');
   const metrics = actions.filter((action) => action.kind === 'metrics');
@@ -3148,6 +3951,8 @@ function ItemDetail({
               <div className="grid gap-4 sm:grid-cols-2">
                 <InfoBlock label="Responsible" people={item.responsible} />
                 <InfoBlock label="Accountable" people={item.accountable} />
+                <InfoBlock label="Consulted" people={item.consulted} />
+                <InfoBlock label="Informed" people={item.informed} />
               </div>
               {['Script', 'Production'].includes(item.stage) && (
                 <Alert className="border-[#dfa126]/40 bg-[#f7efdd]">
@@ -3548,6 +4353,245 @@ function MetricsDialog({
   );
 }
 
+function RaciDialog({
+  intent,
+  people,
+  onOpenChange,
+  onSave,
+}: {
+  intent?: RaciIntent;
+  people: Person[];
+  onOpenChange: (open: boolean) => void;
+  onSave: (item: ContentItem, stage: Stage, assignment: RaciAssignment) => void;
+}) {
+  return (
+    <Dialog open={Boolean(intent)} onOpenChange={onOpenChange}>
+      <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-3xl">
+        <DialogHeader>
+          <DialogTitle>{intent?.stage} RACI assignments</DialogTitle>
+          <DialogDescription>{intent?.item.title}</DialogDescription>
+        </DialogHeader>
+        {intent && (
+          <RaciEditor
+            key={`${intent.item.id}-${intent.stage}`}
+            assignment={raciFor(intent.item, intent.stage)}
+            people={people.filter((person) => person.isActive !== false)}
+            onCancel={() => onOpenChange(false)}
+            onSave={(assignment) => onSave(intent.item, intent.stage, assignment)}
+          />
+        )}
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function RaciEditor({
+  assignment,
+  people,
+  onCancel,
+  onSave,
+}: {
+  assignment: RaciAssignment;
+  people: Person[];
+  onCancel: () => void;
+  onSave: (assignment: RaciAssignment) => void;
+}) {
+  const [values, setValues] = useState(assignment);
+  const roles: Array<[keyof RaciAssignment, string, string]> = [
+    ['responsible', 'R · Responsible', 'Does the work and submits the handoff.'],
+    ['accountable', 'A · Accountable', 'Owns the decision and approves the handoff.'],
+    ['consulted', 'C · Consulted', 'Gives subject-matter input before the decision.'],
+    ['informed', 'I · Informed', 'Receives updates without approval authority.'],
+  ];
+  return (
+    <form
+      className="space-y-5"
+      onSubmit={(event) => {
+        event.preventDefault();
+        if (values.responsible.length && values.accountable.length) onSave(values);
+      }}
+    >
+      <div className="grid gap-4 sm:grid-cols-2">
+        {roles.map(([role, label, description]) => (
+          <div key={role} className="rounded-xl border border-border p-4">
+            <p className="text-sm font-semibold">{label}</p>
+            <p className="mb-3 mt-1 text-sm text-muted-foreground">{description}</p>
+            <div className="space-y-2">
+              {people.map((person) => (
+                <label key={person.id} className="flex cursor-pointer items-center gap-2 text-sm">
+                  <Checkbox
+                    checked={values[role].some((entry) => entry.id === person.id)}
+                    onCheckedChange={(checked) =>
+                      setValues((current) => ({
+                        ...current,
+                        [role]: checked
+                          ? [...current[role].filter((entry) => entry.id !== person.id), person]
+                          : current[role].filter((entry) => entry.id !== person.id),
+                      }))
+                    }
+                  />
+                  {person.name}
+                </label>
+              ))}
+            </div>
+          </div>
+        ))}
+      </div>
+      <p className="text-sm text-muted-foreground">
+        Every stage needs at least one Responsible and Accountable person. Leaving Consulted or Informed blank is shown as a gap in the comparison.
+      </p>
+      <DialogFooter>
+        <Button type="button" variant="outline" onClick={onCancel}>Cancel</Button>
+        <Button type="submit" disabled={!values.responsible.length || !values.accountable.length}>Save RACI</Button>
+      </DialogFooter>
+    </form>
+  );
+}
+
+function CadenceDialog({
+  cadence,
+  people,
+  onOpenChange,
+  onSave,
+}: {
+  cadence?: OperatingCadence | 'new';
+  people: Person[];
+  onOpenChange: (open: boolean) => void;
+  onSave: (draft: CadenceDraft) => void;
+}) {
+  return (
+    <Dialog open={Boolean(cadence)} onOpenChange={onOpenChange}>
+      <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-2xl">
+        <DialogHeader>
+          <DialogTitle>{cadence === 'new' ? 'Add recurring cadence' : 'Edit recurring cadence'}</DialogTitle>
+          <DialogDescription>Set the team rhythm, expected output and people involved. All times use Asia/Kolkata.</DialogDescription>
+        </DialogHeader>
+        {cadence && (
+          <CadenceEditor
+            key={cadence === 'new' ? 'new' : cadence.id}
+            cadence={cadence === 'new' ? undefined : cadence}
+            people={people.filter((person) => person.isActive !== false)}
+            onCancel={() => onOpenChange(false)}
+            onSave={onSave}
+          />
+        )}
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function CadenceEditor({
+  cadence,
+  people,
+  onCancel,
+  onSave,
+}: {
+  cadence?: OperatingCadence;
+  people: Person[];
+  onCancel: () => void;
+  onSave: (draft: CadenceDraft) => void;
+}) {
+  const [draft, setDraft] = useState<CadenceDraft>({
+    id: cadence?.id,
+    name: cadence?.name ?? '',
+    purpose: cadence?.purpose ?? '',
+    frequency: cadence?.frequency ?? 'Weekly',
+    weekday: cadence?.weekday ?? 1,
+    dayOfMonth: cadence?.dayOfMonth ?? 1,
+    time: cadence?.time ?? '10:30',
+    ownerId: cadence?.owner.id ?? people[0]?.id ?? '',
+    participantIds: cadence?.participants.map((person) => person.id) ?? [],
+    stage: cadence?.stage,
+    deliverable: cadence?.deliverable ?? '',
+    reminderHours: cadence?.reminderHours ?? 24,
+    active: cadence?.active ?? true,
+  });
+  const weekdays = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+  return (
+    <form
+      className="space-y-4"
+      onSubmit={(event) => {
+        event.preventDefault();
+        onSave({ ...draft, name: draft.name.trim(), purpose: draft.purpose.trim(), deliverable: draft.deliverable.trim() });
+      }}
+    >
+      <div>
+        <Label className="mb-1.5">Cadence name</Label>
+        <Input required minLength={3} value={draft.name} onChange={(event) => setDraft({ ...draft, name: event.target.value })} placeholder="e.g. Weekly content planning" />
+      </div>
+      <div>
+        <Label className="mb-1.5">Purpose</Label>
+        <Textarea required minLength={3} value={draft.purpose} onChange={(event) => setDraft({ ...draft, purpose: event.target.value })} placeholder="What decision or review should happen?" />
+      </div>
+      <div className="grid gap-3 sm:grid-cols-3">
+        <div>
+          <Label className="mb-1.5">Repeat</Label>
+          <NativeSelect className="w-full" value={draft.frequency} onChange={(event) => setDraft({ ...draft, frequency: event.target.value as CadenceFrequency })}>
+            <NativeSelectOption>Weekly</NativeSelectOption><NativeSelectOption>Monthly</NativeSelectOption>
+          </NativeSelect>
+        </div>
+        <div>
+          <Label className="mb-1.5">{draft.frequency === 'Weekly' ? 'Day of week' : 'Day of month'}</Label>
+          {draft.frequency === 'Weekly' ? (
+            <NativeSelect className="w-full" value={draft.weekday} onChange={(event) => setDraft({ ...draft, weekday: Number(event.target.value) })}>
+              {weekdays.map((day, index) => <NativeSelectOption key={day} value={index}>{day}</NativeSelectOption>)}
+            </NativeSelect>
+          ) : (
+            <Input type="number" min={1} max={28} required value={draft.dayOfMonth} onChange={(event) => setDraft({ ...draft, dayOfMonth: Number(event.target.value) })} />
+          )}
+        </div>
+        <div>
+          <Label className="mb-1.5">Time · IST</Label>
+          <Input type="time" required value={draft.time} onChange={(event) => setDraft({ ...draft, time: event.target.value })} />
+        </div>
+      </div>
+      {draft.frequency === 'Monthly' && <p className="text-sm text-muted-foreground">Choose days 1–28 so every month has the same recurring date.</p>}
+      <div className="grid gap-3 sm:grid-cols-3">
+        <div>
+          <Label className="mb-1.5">Owner</Label>
+          <NativeSelect className="w-full" value={draft.ownerId} onChange={(event) => setDraft({ ...draft, ownerId: event.target.value })}>
+            {people.map((person) => <NativeSelectOption key={person.id} value={person.id}>{person.name}</NativeSelectOption>)}
+          </NativeSelect>
+        </div>
+        <div>
+          <Label className="mb-1.5">Linked stage</Label>
+          <NativeSelect className="w-full" value={draft.stage ?? ''} onChange={(event) => setDraft({ ...draft, stage: event.target.value ? event.target.value as Stage : undefined })}>
+            <NativeSelectOption value="">Cross-stage</NativeSelectOption>
+            {PIPELINE.map((stage) => <NativeSelectOption key={stage}>{stage}</NativeSelectOption>)}
+          </NativeSelect>
+        </div>
+        <div>
+          <Label className="mb-1.5">Reminder · hours before</Label>
+          <Input type="number" min={0} max={720} required value={draft.reminderHours} onChange={(event) => setDraft({ ...draft, reminderHours: Number(event.target.value) })} />
+        </div>
+      </div>
+      <div>
+        <Label className="mb-1.5">Expected deliverable</Label>
+        <Textarea required minLength={3} value={draft.deliverable} onChange={(event) => setDraft({ ...draft, deliverable: event.target.value })} placeholder="What should be ready when this checkpoint is complete?" />
+      </div>
+      <div>
+        <Label className="mb-2">Participants</Label>
+        <div className="grid gap-2 sm:grid-cols-2">
+          {people.map((person) => (
+            <label key={person.id} className="flex cursor-pointer items-center gap-2 rounded-lg border p-2.5 text-sm">
+              <Checkbox checked={draft.participantIds.includes(person.id)} onCheckedChange={(checked) => setDraft({ ...draft, participantIds: checked ? [...draft.participantIds.filter((id) => id !== person.id), person.id] : draft.participantIds.filter((id) => id !== person.id) })} />
+              {person.name}
+            </label>
+          ))}
+        </div>
+      </div>
+      <label className="flex cursor-pointer items-center gap-2 text-sm">
+        <Checkbox checked={draft.active} onCheckedChange={(checked) => setDraft({ ...draft, active: Boolean(checked) })} />
+        Active recurrence
+      </label>
+      <DialogFooter>
+        <Button type="button" variant="outline" onClick={onCancel}>Cancel</Button>
+        <Button type="submit" disabled={!draft.name.trim() || !draft.ownerId || !draft.deliverable.trim() || !draft.purpose.trim()}>Save cadence</Button>
+      </DialogFooter>
+    </form>
+  );
+}
+
 function CreateDialog({
   open,
   onOpenChange,
@@ -3565,6 +4609,8 @@ function CreateDialog({
     dueAt: string;
     responsibleId: string;
     accountableIds: string[];
+    consultedIds: string[];
+    informedIds: string[];
     copyOwners: boolean;
   }) => void;
 }) {
@@ -3579,6 +4625,8 @@ function CreateDialog({
     people[1]?.id ?? people[0]?.id ?? '',
   );
   const [accountableIds, setAccountableIds] = useState<string[]>([]);
+  const [consultedIds, setConsultedIds] = useState<string[]>([]);
+  const [informedIds, setInformedIds] = useState<string[]>([]);
   const [copyOwners, setCopyOwners] = useState(true);
   const availableTypes = PLATFORM_CONTENT_TYPES[platform];
   const submit = (event: SyntheticEvent<HTMLFormElement>) => {
@@ -3592,6 +4640,8 @@ function CreateDialog({
       dueAt,
       responsibleId,
       accountableIds,
+      consultedIds,
+      informedIds,
       copyOwners,
     });
     setTitle('');
@@ -3719,18 +4769,37 @@ function CreateDialog({
               ))}
             </div>
           </div>
-          <div className="flex items-start gap-3 rounded-xl bg-[#f7efdd] p-3 text-sm">
+          <div className="grid gap-4 sm:grid-cols-2">
+            {[
+              { label: 'Consulted', description: 'People who give input before approval', ids: consultedIds, setIds: setConsultedIds },
+              { label: 'Informed', description: 'People who receive progress updates', ids: informedIds, setIds: setInformedIds },
+            ].map(({ label, description, ids, setIds }) => (
+              <div key={label}>
+                <Label>{label}</Label>
+                <p className="mb-2 mt-1 text-sm text-muted-foreground">{description}</p>
+                <div className="space-y-2">
+                  {people.filter((person) => person.isActive !== false).map((person) => (
+                    <label key={person.id} className="flex cursor-pointer items-center gap-2 text-sm">
+                      <Checkbox checked={ids.includes(person.id)} onCheckedChange={(checked) => setIds(checked ? [...ids.filter((id) => id !== person.id), person.id] : ids.filter((id) => id !== person.id))} />
+                      {person.name}
+                    </label>
+                  ))}
+                </div>
+              </div>
+            ))}
+          </div>
+          <div className="flex items-start gap-3 rounded-xl bg-muted p-3 text-sm">
             <Checkbox
-              aria-label="Copy accountable owners to all stages"
+              aria-label="Copy full RACI assignments to all stages"
               checked={copyOwners}
               onCheckedChange={(checked) => setCopyOwners(Boolean(checked))}
             />
             <span>
               <strong className="block text-card-foreground">
-                Plan accountability ahead
+                Plan the full RACI ahead
               </strong>
-              <span className="text-[#6b5b35]">
-                Copy these owners across all six stages. Admin can revise each
+              <span className="text-muted-foreground">
+                Copy all four assignments across all six stages. Admin can revise each
                 stage later.
               </span>
             </span>

@@ -55,6 +55,12 @@ export type Person = {
   isActive?: boolean;
   responsibility?: string;
 };
+export type RaciAssignment = {
+  responsible: Person[];
+  accountable: Person[];
+  consulted: Person[];
+  informed: Person[];
+};
 export type ItemLink = { label: string; kind: string; url: string };
 export type HistoryEvent = {
   action: string;
@@ -102,6 +108,9 @@ export type ContentItem = {
   lifecycle: 'Active' | 'Closed' | 'Archived';
   responsible: Person[];
   accountable: Person[];
+  consulted: Person[];
+  informed: Person[];
+  raci: Record<Stage, RaciAssignment>;
   secondLens:
     | 'Not needed'
     | 'Awaiting review'
@@ -113,6 +122,33 @@ export type ContentItem = {
   comments: Comment[];
   metrics: MetricEntry[];
   publishedAt?: string;
+};
+
+export type CadenceFrequency = 'Weekly' | 'Monthly';
+export type OperatingCadence = {
+  id: string;
+  name: string;
+  purpose: string;
+  frequency: CadenceFrequency;
+  weekday?: number;
+  dayOfMonth?: number;
+  time: string;
+  timezone: 'Asia/Kolkata';
+  owner: Person;
+  participants: Person[];
+  stage?: Stage;
+  deliverable: string;
+  reminderHours: number;
+  active: boolean;
+};
+
+export type CadenceRun = {
+  cadenceId: string;
+  scheduledFor: string;
+  status: 'Upcoming' | 'Complete' | 'Skipped';
+  completedAt?: string;
+  completedBy?: Person;
+  notes?: string;
 };
 
 export type DepartmentRequest = {

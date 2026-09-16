@@ -20,6 +20,10 @@ Deno.serve(async (request) => {
   }
 
   const databaseHeaders = { apikey: serviceRoleKey, authorization: `Bearer ${serviceRoleKey}`, 'content-type': 'application/json' };
+  for (const job of ['enqueue_due_date_reminders', 'enqueue_cadence_reminders']) {
+    const result = await fetch(`${supabaseUrl}/rest/v1/rpc/${job}`, { method: 'POST', headers: databaseHeaders, body: '{}' });
+    if (!result.ok) return new Response(JSON.stringify({ error: 'Could not queue reminders' }), { status: 502, headers: jsonHeaders });
+  }
   const pendingResponse = await fetch(`${supabaseUrl}/rest/v1/email_outbox?select=id,recipient_email,subject,html_body,attempts&status=in.(pending,failed)&attempts=lt.5&order=created_at.asc&limit=25`, { headers: databaseHeaders });
   if (!pendingResponse.ok) return new Response(JSON.stringify({ error: 'Could not read the email outbox' }), { status: 502, headers: jsonHeaders });
   const pending = await pendingResponse.json() as OutboxRow[];

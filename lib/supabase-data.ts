@@ -1,10 +1,13 @@
 import type { SupabaseClient, User } from '@supabase/supabase-js';
 import type {
   AppRole,
+  CadenceRun,
   ContentItem,
   ContentPillar,
   DepartmentRequest,
+  OperatingCadence,
   Person,
+  RaciAssignment,
   Stage,
   StageStatus,
 } from './content-types';
@@ -50,6 +53,8 @@ export type LiveSnapshot = {
   people: Person[];
   items: ContentItem[];
   requests: DepartmentRequest[];
+  cadences: OperatingCadence[];
+  cadenceRuns: CadenceRun[];
 };
 
 export async function loadLiveSnapshot(
@@ -68,6 +73,9 @@ export async function loadLiveSnapshot(
     commentsRes,
     metricsRes,
     requestsRes,
+    cadencesRes,
+    cadenceParticipantsRes,
+    cadenceRunsRes,
   ] = await Promise.all([
     client.from('profiles').select('id,email,full_name,is_active'),
     client.from('workspace_owners').select('profile_id,slot'),
@@ -98,6 +106,15 @@ export async function loadLiveSnapshot(
       .from('department_requests')
       .select('*')
       .order('created_at', { ascending: false }),
+    client
+      .from('operating_cadences')
+      .select('*')
+      .order('created_at', { ascending: true }),
+    client.from('cadence_participants').select('*'),
+    client
+      .from('cadence_runs')
+      .select('*')
+      .order('scheduled_for', { ascending: true }),
   ]);
   const error = [
     profilesRes,
@@ -111,6 +128,9 @@ export async function loadLiveSnapshot(
     commentsRes,
     metricsRes,
     requestsRes,
+    cadencesRes,
+    cadenceParticipantsRes,
+    cadenceRunsRes,
   ].find((result) => result.error)?.error;
   if (error) throw error;
 
@@ -143,6 +163,9 @@ export async function loadLiveSnapshot(
     };
 
   const items: ContentItem[] = (itemsRes.data ?? []).map((row) => {
+    const assignmentRows = (assignmentsRes.data ?? []).filter(
+      (assignment) => assignment.content_item_id === row.id,
+    );
     const itemAssignments = (assignmentsRes.data ?? []).filter(
       (assignment) =>
         assignment.content_item_id === row.id &&
@@ -159,6 +182,28 @@ export async function loadLiveSnapshot(
         : latestReview?.decision === 'changes_requested'
           ? 'Changes requested'
           : 'Awaiting review';
+    const raci = Object.fromEntries(
+      Object.entries(stageFromDb).map(([dbStage, stage]) => {
+        const stageAssignments = assignmentRows.filter(
+          (assignment) => assignment.stage === dbStage,
+        );
+        const peopleFor = (assignmentType: string) =>
+          stageAssignments
+            .filter(
+              (assignment) => assignment.assignment_type === assignmentType,
+            )
+            .map((assignment) => fallbackPerson(assignment.profile_id));
+        return [
+          stage,
+          {
+            responsible: peopleFor('responsible'),
+            accountable: peopleFor('accountable'),
+            consulted: peopleFor('consulted'),
+            informed: peopleFor('informed'),
+          },
+        ];
+      }),
+    ) as Record<Stage, RaciAssignment>;
     return {
       id: row.id,
       title: row.title,
@@ -177,6 +222,13 @@ export async function loadLiveSnapshot(
       accountable: itemAssignments
         .filter((assignment) => assignment.assignment_type === 'accountable')
         .map((assignment) => fallbackPerson(assignment.profile_id)),
+      consulted: itemAssignments
+        .filter((assignment) => assignment.assignment_type === 'consulted')
+        .map((assignment) => fallbackPerson(assignment.profile_id)),
+      informed: itemAssignments
+        .filter((assignment) => assignment.assignment_type === 'informed')
+        .map((assignment) => fallbackPerson(assignment.profile_id)),
+      raci,
       secondLens: secondLens as ContentItem['secondLens'],
       publishedAt: row.published_at ?? undefined,
       links: (linksRes.data ?? [])
@@ -256,11 +308,46 @@ export async function loadLiveSnapshot(
           ? 'Scheduled'
           : 'New',
   }));
+  const cadences: OperatingCadence[] = (cadencesRes.data ?? []).map((row) => ({
+    id: row.id,
+    name: row.name,
+    purpose: row.purpose,
+    frequency: row.frequency === 'monthly' ? 'Monthly' : 'Weekly',
+    weekday: row.weekday ?? undefined,
+    dayOfMonth: row.day_of_month ?? undefined,
+    time: String(row.time_of_day).slice(0, 5),
+    timezone: 'Asia/Kolkata',
+    owner: fallbackPerson(row.owner_id),
+    participants: (cadenceParticipantsRes.data ?? [])
+      .filter((entry) => entry.cadence_id === row.id)
+      .map((entry) => fallbackPerson(entry.profile_id)),
+    stage: row.stage ? stageFromDb[row.stage] : undefined,
+    deliverable: row.deliverable,
+    reminderHours: row.reminder_hours_before,
+    active: row.is_active,
+  }));
+  const cadenceRuns: CadenceRun[] = (cadenceRunsRes.data ?? []).map((row) => ({
+    cadenceId: row.cadence_id,
+    scheduledFor: new Date(row.scheduled_for).toISOString(),
+    status:
+      row.status === 'complete'
+        ? 'Complete'
+        : row.status === 'skipped'
+          ? 'Skipped'
+          : 'Upcoming',
+    completedAt: row.completed_at ?? undefined,
+    completedBy: row.completed_by
+      ? fallbackPerson(row.completed_by)
+      : undefined,
+    notes: row.notes ?? undefined,
+  }));
   return {
     currentUser,
     currentUserActive: Boolean(profile?.is_active),
     people,
     items,
     requests,
+    cadences,
+    cadenceRuns,
   };
 }

@@ -68,8 +68,10 @@ Deno.serve(async (request) => {
     return reply({ error: 'Enter a valid email address' }, 400);
   if (!fullName || fullName.length > 120)
     return reply({ error: 'Enter the person’s name' }, 400);
-  if (!roles.length || roles.some((role) => !allowedRoles.has(role)))
-    return reply({ error: 'Choose at least one valid role' }, 400);
+  if (roles.some((role) => !allowedRoles.has(role)))
+    return reply({ error: 'Choose only valid responsibilities' }, 400);
+  if (owner && !roles.length)
+    return reply({ error: 'Choose at least one responsibility' }, 400);
 
   const origin = request.headers.get('origin');
   const redirectTo = origin && /^https?:\/\//.test(origin) ? origin : undefined;
@@ -84,16 +86,22 @@ Deno.serve(async (request) => {
       400,
     );
 
-  const { error: rolesError } = await admin
-    .from('user_roles')
-    .insert(roles.map((role) => ({ profile_id: invited.user!.id, role })));
-  if (rolesError)
-    return reply({ error: 'Invitation created, but role setup failed' }, 500);
+  if (owner) {
+    const { error: rolesError } = await admin
+      .from('user_roles')
+      .insert(roles.map((role) => ({ profile_id: invited.user!.id, role })));
+    if (rolesError)
+      return reply({ error: 'Invitation created, but role setup failed' }, 500);
+  }
   const { error: profileError } = await admin
     .from('profiles')
-    .update({ full_name: fullName, is_active: true })
+    .update({ full_name: fullName, is_active: Boolean(owner) })
     .eq('id', invited.user.id);
   if (profileError)
     return reply({ error: 'Invitation created, but access setup failed' }, 500);
-  return reply({ invited: true, email });
+  return reply({
+    invited: true,
+    email,
+    access: owner ? 'active' : 'pending_owner_approval',
+  });
 });

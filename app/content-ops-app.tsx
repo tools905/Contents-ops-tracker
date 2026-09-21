@@ -22,6 +22,7 @@ import {
   CircleGauge,
   Clock3,
   ExternalLink,
+  Eye,
   FileCheck2,
   FileText,
   GripVertical,
@@ -177,7 +178,7 @@ const stageToDb: Record<Stage, string> = {
   Shoot: 'shoot',
   Production: 'production',
   Upload: 'upload',
-  'Post-Upload Metrics': 'post_upload_metrics',
+  'Post-Upload': 'post_upload_metrics',
 };
 const roleToDb: Record<Exclude<AppRole, 'Owner'>, string> = {
   Admin: 'admin',
@@ -224,6 +225,16 @@ export default function ContentOpsApp({
   const [cadenceRuns, setCadenceRuns] = useState<CadenceRun[]>(demoCadenceRuns);
   const [currentUser, setCurrentUser] = useState<Person>(demoPeople[0]);
   const [currentRole, setCurrentRole] = useState<AppRole>('Owner');
+  const [previewRole, setPreviewRole] = useState<
+    Exclude<AppRole, 'Owner'> | null
+  >(null);
+  const [needsPasswordSetup, setNeedsPasswordSetup] = useState(() =>
+    typeof window === 'undefined'
+      ? false
+      : /(?:#|[?&])type=(?:invite|recovery)(?:&|$)/.test(
+          `${window.location.hash}${window.location.search}`,
+        ),
+  );
   const [view, setView] = useState<View>('today');
   const [selectedId, setSelectedId] = useState<string>();
   const [createOpen, setCreateOpen] = useState(false);
@@ -295,8 +306,9 @@ export default function ContentOpsApp({
         setNotice(error.message);
         setAuthReady(true);
       });
-    const { data } = client.auth.onAuthStateChange((_event, session) => {
+    const { data } = client.auth.onAuthStateChange((event, session) => {
       const user = session?.user ?? null;
+      if (event === 'PASSWORD_RECOVERY') setNeedsPasswordSetup(true);
       setAuthUser(user);
       if (user)
         void reloadLive(client, user).catch((error) =>
@@ -309,13 +321,23 @@ export default function ContentOpsApp({
     };
   }, [client, reloadLive]);
 
+  const isOwner = currentUser.roles.includes('Owner');
+  const isRolePreview = !demoMode && isOwner && Boolean(previewRole);
   const rolePerson = demoMode
     ? (people.find((person) => person.id === ROLE_PERSON[currentRole]) ??
       currentUser)
-    : currentUser;
+    : previewRole
+      ? (people.find((person) => person.roles.includes(previewRole)) ??
+        currentUser)
+      : currentUser;
   const effectiveRoles = useMemo(
-    () => (demoMode ? [currentRole] : currentUser.roles),
-    [demoMode, currentRole, currentUser.roles],
+    () =>
+      demoMode
+        ? [currentRole]
+        : previewRole
+          ? [previewRole]
+          : currentUser.roles,
+    [demoMode, currentRole, currentUser.roles, previewRole],
   );
   const selected = items.find((item) => item.id === selectedId);
   const visibleItems = useMemo(
@@ -363,6 +385,10 @@ export default function ContentOpsApp({
     work: (supabase: SupabaseClient) => Promise<unknown>,
     success: string,
   ) => {
+    if (isRolePreview) {
+      showNotice('Role preview is read-only. Exit preview to make changes.');
+      return false;
+    }
     if (!client || !authUser) return false;
     setBusy(true);
     try {
@@ -770,52 +796,6 @@ export default function ContentOpsApp({
     showNotice(resolved ? 'Feedback resolved.' : 'Feedback reopened.');
   };
 
-  const addMetric = async (item: ContentItem, values: MetricDraft) => {
-    if (!demoMode)
-      return mutateLive(async (supabase) => {
-        const { error } = await supabase.from('metrics_entries').upsert(
-          {
-            content_item_id: item.id,
-            platform: values.platform,
-            content_url: values.contentUrl || null,
-            views: values.views,
-            reach: values.reach,
-            impressions: values.impressions,
-            likes: values.likes,
-            comments: values.comments,
-            shares: values.shares,
-            saves: values.saves,
-            watch_time_seconds: values.watchTimeMinutes * 60,
-            follower_change: values.followerChange,
-            notes: values.notes || null,
-            recorded_on: values.recordedOn,
-            recorded_by: authUser!.id,
-            source: 'manual',
-          },
-          { onConflict: 'content_item_id,platform,recorded_on,source' },
-        );
-        if (error) throw error;
-      }, 'Metrics snapshot saved.');
-    setItems((all) =>
-      all.map((row) =>
-        row.id === item.id
-          ? {
-              ...row,
-              metrics: [
-                {
-                  id: crypto.randomUUID(),
-                  ...values,
-                  source: 'Manual',
-                },
-                ...row.metrics,
-              ],
-            }
-          : row,
-      ),
-    );
-    showNotice('Metrics snapshot saved.');
-  };
-
   const createItem = async (draft: {
     title: string;
     contentType: string;
@@ -1198,6 +1178,18 @@ export default function ContentOpsApp({
     return (
       <LoginScreen client={client!} notice={notice} setNotice={setNotice} />
     );
+  if (!demoMode && authUser && needsPasswordSetup)
+    return (
+      <SetPasswordScreen
+        client={client!}
+        email={authUser.email ?? ''}
+        onComplete={() => {
+          window.history.replaceState({}, document.title, window.location.pathname);
+          setNeedsPasswordSetup(false);
+        }}
+        signOut={() => void client?.auth.signOut()}
+      />
+    );
   if (!demoMode && !activeProfile)
     return (
       <PendingAccess
@@ -1305,6 +1297,40 @@ export default function ContentOpsApp({
                 <NativeSelectOption>Read-only Stakeholder</NativeSelectOption>
               </NativeSelect>
             )}
+            {!demoMode && isOwner && (
+              <div className="relative hidden sm:block">
+                <Eye className="pointer-events-none absolute left-2.5 top-1/2 z-10 size-4 -translate-y-1/2 text-muted-foreground" />
+                <NativeSelect
+                  aria-label="Preview the tracker as another role"
+                  value={previewRole ?? 'Owner'}
+                  onChange={(event) => {
+                    const role = event.target.value as AppRole;
+                    setPreviewRole(
+                      role === 'Owner'
+                        ? null
+                        : (role as Exclude<AppRole, 'Owner'>),
+                    );
+                    setView('today');
+                  }}
+                  className="max-w-[210px] bg-card pl-8"
+                >
+                  <NativeSelectOption value="Owner">Owner view</NativeSelectOption>
+                  <NativeSelectOption value="Admin">Preview Admin</NativeSelectOption>
+                  <NativeSelectOption value="Content Producer">
+                    Preview Content Producer
+                  </NativeSelectOption>
+                  <NativeSelectOption value="Content Approver">
+                    Preview Content Approver
+                  </NativeSelectOption>
+                  <NativeSelectOption value="Monitoring">
+                    Preview Monitoring
+                  </NativeSelectOption>
+                  <NativeSelectOption value="Read-only Stakeholder">
+                    Preview Read-only
+                  </NativeSelectOption>
+                </NativeSelect>
+              </div>
+            )}
             <div className="relative hidden sm:block">
               {theme === 'dark' ? (
                 <Moon className="pointer-events-none absolute left-2.5 top-1/2 z-10 size-4 -translate-y-1/2 text-muted-foreground" />
@@ -1388,6 +1414,16 @@ export default function ContentOpsApp({
             {notice}
           </output>
         )}
+        {isRolePreview && (
+          <Alert className="mx-4 mt-4 border-[#dfa126]/45 bg-[var(--warning-subtle)] text-[var(--warning-foreground)] sm:mx-7 lg:mx-10">
+            <Eye />
+            <AlertTitle>Previewing the {previewRole} experience</AlertTitle>
+            <AlertDescription>
+              This is a read-only preview. Aditi remains signed in as the
+              protected Owner.
+            </AlertDescription>
+          </Alert>
+        )}
         <main className="mx-auto w-full max-w-[1480px] px-4 py-7 sm:px-7 lg:px-10 lg:py-9">
           {view === 'today' && (
             <Today
@@ -1398,7 +1434,6 @@ export default function ContentOpsApp({
               cadenceRuns={cadenceRuns}
               onOpen={(id) => setSelectedId(id)}
               onReview={secondLensReview}
-              onSaveMetric={addMetric}
               setView={setView}
             />
           )}
@@ -1468,6 +1503,7 @@ export default function ContentOpsApp({
         open={inviteOpen}
         onOpenChange={setInviteOpen}
         onInvite={inviteUser}
+        canAssignAccess={canManageAccess}
       />
       <ItemDetail
         open={Boolean(selected)}
@@ -1482,7 +1518,6 @@ export default function ContentOpsApp({
         onRequestChanges={requestChanges}
         onComment={addComment}
         onResolveComment={setCommentResolution}
-        onMetric={addMetric}
       />
       <RaciDialog
         intent={raciIntent}
@@ -1516,14 +1551,14 @@ function hasAnyRole(roles: AppRole[], expected: AppRole[]) {
 
 function dashboardScope(roles: AppRole[]) {
   if (hasAnyRole(roles, ['Owner', 'Admin']))
-    return 'You can see the full content portfolio, every approval, and all performance snapshots. Only Owners can change email access and roles.';
+    return 'You can see the full content portfolio, every approval, and every accountable handoff. Only the Owner can change email access and roles.';
   if (roles.includes('Monitoring'))
-    return 'You see published content and can add or update manual performance snapshots for reporting.';
+    return 'You see publishing completion, live links, and post-upload learning notes relevant to your role.';
   if (roles.includes('Content Approver'))
-    return 'You see content awaiting your review, its handoff history, and the performance of work you approved.';
+    return 'You see content awaiting your review and its complete handoff history.';
   if (roles.includes('Content Producer'))
-    return 'You see the content assigned to you, its deadlines, approvals, and post-publish results.';
-  return 'You have a read-only view of approved portfolio progress and aggregate performance.';
+    return 'You see the content assigned to you, its deadlines, approvals, and post-upload closeout.';
+  return 'You have a read-only view of approved portfolio progress.';
 }
 function isAssigned(
   item: ContentItem,
@@ -1577,7 +1612,7 @@ function filterForRoles(
       (roles.includes('Content Approver') &&
         ['Script', 'Production'].includes(item.stage)) ||
       (roles.includes('Monitoring') &&
-        (item.stage === 'Post-Upload Metrics' || Boolean(item.publishedAt))),
+        (item.stage === 'Post-Upload' || Boolean(item.publishedAt))),
   );
 }
 
@@ -1586,7 +1621,6 @@ type ActionItem = {
   kind:
     | 'approval'
     | 'second-lens'
-    | 'metrics'
     | 'work'
     | 'consultation'
     | 'feedback';
@@ -1646,17 +1680,6 @@ function getMyActions(
         kind: 'second-lens',
         label: 'Complete second-lens review',
         priority: 1,
-      });
-    if (
-      item.stage === 'Post-Upload Metrics' &&
-      item.metrics.length === 0 &&
-      (elevated || roles.includes('Monitoring'))
-    )
-      actions.push({
-        item,
-        kind: 'metrics',
-        label: 'Add performance metrics',
-        priority: isOverdue(item) ? 0 : 2,
       });
     if (
       item.status !== 'Pending approval' &&
@@ -1917,7 +1940,6 @@ function Today({
   cadenceRuns,
   onOpen,
   onReview,
-  onSaveMetric,
   setView,
 }: {
   items: ContentItem[];
@@ -1927,7 +1949,6 @@ function Today({
   cadenceRuns: CadenceRun[];
   onOpen: (id: string) => void;
   onReview: (item: ContentItem, approved: boolean, note: string) => void;
-  onSaveMetric: (item: ContentItem, values: MetricDraft) => void;
   setView: (view: View) => void;
 }) {
   const active = items.filter((item) => item.lifecycle === 'Active');
@@ -1940,7 +1961,6 @@ function Today({
       action.kind === 'consultation' ||
       action.kind === 'feedback',
   );
-  const metrics = actions.filter((action) => action.kind === 'metrics');
   const overdue = active.filter(isOverdue);
   return (
     <>
@@ -2035,26 +2055,6 @@ function Today({
               )}
             </CardContent>
           </Card>
-          {metrics.length > 0 && (
-            <Card className="bg-card">
-              <CardHeader>
-                <CardTitle>Metrics to record</CardTitle>
-                <CardDescription>
-                  Complete the post-upload feedback loop.
-                </CardDescription>
-              </CardHeader>
-              <CardContent className="space-y-4">
-                {metrics.map(({ item }) => (
-                  <MetricsCard
-                    key={item.id}
-                    item={item}
-                    onSave={onSaveMetric}
-                    onOpen={onOpen}
-                  />
-                ))}
-              </CardContent>
-            </Card>
-          )}
         </div>
         <div className="space-y-5">
           <Card className="bg-card">
@@ -2951,7 +2951,7 @@ function OperatingCadenceView({
               [
                 'Learn',
                 'Weekly pulse, monthly analytics and learning notes',
-                'Post-Upload Metrics',
+                'Post-Upload',
               ],
             ].map(([label, detail, stage], index) => {
               const linked = cadences.filter(
@@ -3410,12 +3410,10 @@ function MyActions({
   actions,
   onOpen,
   onReview,
-  onSaveMetric,
 }: {
   actions: ActionItem[];
   onOpen: (id: string) => void;
   onReview: (item: ContentItem, approved: boolean, note: string) => void;
-  onSaveMetric: (item: ContentItem, values: MetricDraft) => void;
 }) {
   const direct = actions.filter(
     (action) =>
@@ -3424,7 +3422,6 @@ function MyActions({
       action.kind === 'consultation',
   );
   const reviews = actions.filter((action) => action.kind === 'second-lens');
-  const metrics = actions.filter((action) => action.kind === 'metrics');
   return (
     <>
       <PageTitle
@@ -3508,26 +3505,6 @@ function MyActions({
           </div>
         </section>
       )}
-      {metrics.length > 0 && (
-        <section>
-          <div className="mb-3 flex items-center gap-2">
-            <h2 className="text-base font-semibold text-card-foreground">
-              Metrics to record
-            </h2>
-            <Badge variant="secondary">{metrics.length}</Badge>
-          </div>
-          <div className="grid gap-4">
-            {metrics.map(({ item }) => (
-              <MetricsCard
-                key={item.id}
-                item={item}
-                onSave={onSaveMetric}
-                onOpen={onOpen}
-              />
-            ))}
-          </div>
-        </section>
-      )}
     </>
   );
 }
@@ -3597,7 +3574,7 @@ function Monitoring({
   onSave: (item: ContentItem, values: MetricDraft) => void;
 }) {
   const missing = items.filter(
-    (item) => item.stage === 'Post-Upload Metrics' && item.metrics.length === 0,
+    (item) => item.stage === 'Post-Upload' && item.metrics.length === 0,
   );
   const recorded = items.filter((item) => item.metrics.length > 0);
   return (
@@ -3851,7 +3828,7 @@ function People({
       <PageTitle
         eyebrow="PEOPLE & ACCESS"
         title="Give each person only what they need."
-        description="Owners and Admins can invite teammates. The two Owner accounts stay protected, and only Owners can change existing access."
+        description="Owners and Admins can invite teammates. Aditi is the protected Owner and the only person who can activate, pause or change access."
         action={
           <Button onClick={onInvite}>
             <Plus /> Invite teammate
@@ -3861,11 +3838,12 @@ function People({
       <div className="mb-5 grid gap-4 lg:grid-cols-[1fr_1.3fr]">
         <Alert className="border-[#dfa126]/40 bg-[var(--warning-subtle)] text-[var(--warning-foreground)]">
           <ShieldCheck />
-          <AlertTitle>{owners.length}/2 protected Owner accounts</AlertTitle>
+          <AlertTitle>{owners.length}/1 protected Owner account</AlertTitle>
           <AlertDescription>
-            Owners have unrestricted access and are the only people who can
-            grant or change app access. Admins run all content operations but
-            cannot appoint Owners.
+            Aditi has unrestricted access and is the only person who can grant
+            or change app access. Admins run content operations and may send an
+            invitation, but the invited account remains pending until Aditi
+            assigns its responsibilities.
           </AlertDescription>
         </Alert>
         {demoMode && (
@@ -4127,7 +4105,6 @@ function ItemDetail({
   onRequestChanges,
   onComment,
   onResolveComment,
-  onMetric,
 }: {
   open: boolean;
   item?: ContentItem;
@@ -4151,7 +4128,6 @@ function ItemDetail({
     commentId: string,
     resolved: boolean,
   ) => void;
-  onMetric: (item: ContentItem, values: MetricDraft) => void;
 }) {
   const [comment, setComment] = useState('');
   const [commentKind, setCommentKind] = useState<Comment['kind']>('Update');
@@ -4199,7 +4175,6 @@ function ItemDetail({
                 )}
               </TabsTrigger>
               <TabsTrigger value="history">History</TabsTrigger>
-              <TabsTrigger value="metrics">Metrics</TabsTrigger>
             </TabsList>
 
             <TabsContent value="work" className="space-y-5 py-5">
@@ -4521,49 +4496,6 @@ function ItemDetail({
               </div>
             </TabsContent>
 
-            <TabsContent value="metrics" className="py-5">
-              <div className="space-y-3">
-                {item.metrics.map((metric) => (
-                  <div key={metric.id} className="rounded-xl bg-muted p-4">
-                    <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
-                      <p className="text-sm font-medium">
-                        {metric.platform} · {metric.recordedOn}
-                      </p>
-                      <Badge variant="secondary">{metric.source}</Badge>
-                    </div>
-                    <div className="grid grid-cols-3 gap-2 sm:grid-cols-6">
-                      <MiniStat label="Views" value={metric.views} />
-                      <MiniStat label="Reach" value={metric.reach} />
-                      <MiniStat
-                        label="Impressions"
-                        value={metric.impressions}
-                      />
-                      <MiniStat label="Likes" value={metric.likes} />
-                      <MiniStat label="Shares" value={metric.shares} />
-                      <MiniStat label="Saves" value={metric.saves} />
-                    </div>
-                    {metric.notes && (
-                      <p className="mt-3 text-sm text-muted-foreground">
-                        {metric.notes}
-                      </p>
-                    )}
-                  </div>
-                ))}
-                {!item.metrics.length && (
-                  <p className="py-6 text-center text-sm text-muted-foreground">
-                    No metrics recorded yet.
-                  </p>
-                )}
-              </div>
-              {hasAnyRole(roles, ['Owner', 'Admin', 'Monitoring']) &&
-                item.stage === 'Post-Upload Metrics' && (
-                  <MetricsCard
-                    item={item}
-                    onSave={onMetric}
-                    onOpen={() => undefined}
-                  />
-                )}
-            </TabsContent>
           </Tabs>
         </div>
 
@@ -5236,10 +5168,12 @@ function InviteUserDialog({
   open,
   onOpenChange,
   onInvite,
+  canAssignAccess,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   onInvite: (draft: InviteDraft) => void;
+  canAssignAccess: boolean;
 }) {
   const [fullName, setFullName] = useState('');
   const [email, setEmail] = useState('');
@@ -5267,11 +5201,11 @@ function InviteUserDialog({
           className="space-y-4"
           onSubmit={(event) => {
             event.preventDefault();
-            if (!roles.length) return;
+            if (canAssignAccess && !roles.length) return;
             onInvite({
               email: email.trim().toLowerCase(),
               fullName: fullName.trim(),
-              roles,
+              roles: canAssignAccess ? roles : [],
             });
           }}
         >
@@ -5294,29 +5228,40 @@ function InviteUserDialog({
               placeholder="name@aafmindia.com"
             />
           </div>
-          <div>
-            <Label className="mb-2">Starting access</Label>
-            <div className="grid gap-2 sm:grid-cols-2">
-              {assignable.map((role) => (
-                <label
-                  key={role}
-                  className="flex cursor-pointer items-center gap-2 rounded-lg border border-border p-2.5 text-sm"
-                >
-                  <Checkbox
-                    checked={roles.includes(role)}
-                    onCheckedChange={(checked) =>
-                      setRoles(
-                        checked
-                          ? [...roles, role]
-                          : roles.filter((entry) => entry !== role),
-                      )
-                    }
-                  />
-                  {role}
-                </label>
-              ))}
+          {canAssignAccess ? (
+            <div>
+              <Label className="mb-2">Starting access</Label>
+              <div className="grid gap-2 sm:grid-cols-2">
+                {assignable.map((role) => (
+                  <label
+                    key={role}
+                    className="flex cursor-pointer items-center gap-2 rounded-lg border border-border p-2.5 text-sm"
+                  >
+                    <Checkbox
+                      checked={roles.includes(role)}
+                      onCheckedChange={(checked) =>
+                        setRoles(
+                          checked
+                            ? [...roles, role]
+                            : roles.filter((entry) => entry !== role),
+                        )
+                      }
+                    />
+                    {role}
+                  </label>
+                ))}
+              </div>
             </div>
-          </div>
+          ) : (
+            <Alert className="border-border bg-muted/45">
+              <ShieldCheck />
+              <AlertTitle>Aditi will approve access</AlertTitle>
+              <AlertDescription>
+                You can send the invitation. The account remains pending until
+                Aditi assigns its responsibilities.
+              </AlertDescription>
+            </Alert>
+          )}
           <p className="text-sm text-muted-foreground">
             Invitations will be sent from the verified updates.buildablelabs.com
             email domain after Resend is connected.
@@ -5331,7 +5276,11 @@ function InviteUserDialog({
             </Button>
             <Button
               type="submit"
-              disabled={!fullName.trim() || !email.trim() || !roles.length}
+              disabled={
+                !fullName.trim() ||
+                !email.trim() ||
+                (canAssignAccess && !roles.length)
+              }
             >
               <Send /> Send invitation
             </Button>
@@ -5714,6 +5663,23 @@ function LoginScreen({
     if (error) setNotice(error.message);
     setBusy(false);
   };
+  const resetPassword = async () => {
+    if (!email.trim()) {
+      setNotice('Enter your email address first.');
+      return;
+    }
+    setBusy(true);
+    const { error } = await client.auth.resetPasswordForEmail(
+      email.trim().toLowerCase(),
+      { redirectTo: window.location.origin },
+    );
+    setNotice(
+      error
+        ? error.message
+        : 'Check your inbox for a secure password-reset link.',
+    );
+    setBusy(false);
+  };
   return (
     <div className="grid min-h-svh place-items-center bg-background p-4">
       <div className="w-full max-w-md">
@@ -5761,6 +5727,15 @@ function LoginScreen({
               <Button className="w-full" disabled={busy}>
                 {busy ? 'Signing in…' : 'Sign in'}
               </Button>
+              <Button
+                type="button"
+                variant="ghost"
+                className="w-full"
+                disabled={busy}
+                onClick={() => void resetPassword()}
+              >
+                Forgot password?
+              </Button>
             </form>
           </CardContent>
         </Card>
@@ -5768,6 +5743,98 @@ function LoginScreen({
           Invite-only access · Asia/Kolkata
         </p>
       </div>
+    </div>
+  );
+}
+
+function SetPasswordScreen({
+  client,
+  email,
+  onComplete,
+  signOut,
+}: {
+  client: SupabaseClient;
+  email: string;
+  onComplete: () => void;
+  signOut: () => void;
+}) {
+  const [password, setPassword] = useState('');
+  const [confirmPassword, setConfirmPassword] = useState('');
+  const [message, setMessage] = useState('');
+  const [busy, setBusy] = useState(false);
+
+  const submit = async (event: SyntheticEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (password.length < 10) {
+      setMessage('Use at least 10 characters.');
+      return;
+    }
+    if (password !== confirmPassword) {
+      setMessage('The passwords do not match.');
+      return;
+    }
+    setBusy(true);
+    const { error } = await client.auth.updateUser({ password });
+    setBusy(false);
+    if (error) {
+      setMessage(error.message);
+      return;
+    }
+    onComplete();
+  };
+
+  return (
+    <div className="grid min-h-svh place-items-center bg-background p-4">
+      <Card className="w-full max-w-md bg-card shadow-xl">
+        <CardHeader>
+          <CardTitle className="font-display text-2xl">
+            Create your password
+          </CardTitle>
+          <CardDescription>{email}</CardDescription>
+        </CardHeader>
+        <CardContent>
+          <form onSubmit={submit} className="space-y-4">
+            <div>
+              <Label className="mb-1.5">New password</Label>
+              <Input
+                type="password"
+                minLength={10}
+                autoComplete="new-password"
+                value={password}
+                onChange={(event) => setPassword(event.target.value)}
+                required
+              />
+            </div>
+            <div>
+              <Label className="mb-1.5">Confirm password</Label>
+              <Input
+                type="password"
+                minLength={10}
+                autoComplete="new-password"
+                value={confirmPassword}
+                onChange={(event) => setConfirmPassword(event.target.value)}
+                required
+              />
+            </div>
+            {message && (
+              <p className="text-sm text-[var(--danger-foreground)]">
+                {message}
+              </p>
+            )}
+            <Button className="w-full" disabled={busy}>
+              {busy ? 'Saving…' : 'Save password'}
+            </Button>
+            <Button
+              type="button"
+              variant="ghost"
+              className="w-full"
+              onClick={signOut}
+            >
+              Sign out
+            </Button>
+          </form>
+        </CardContent>
+      </Card>
     </div>
   );
 }
@@ -5799,8 +5866,8 @@ function PendingAccess({
         </CardHeader>
         <CardContent>
           <p className="text-sm text-muted-foreground">
-            Your account is valid. One of the two workspace Owners needs to
-            activate it and assign at least one role.
+            Your account is valid. Aditi needs to activate it and assign at
+            least one responsibility.
           </p>
           <Button variant="outline" className="mt-4" onClick={signOut}>
             Sign out

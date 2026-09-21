@@ -76,6 +76,11 @@ export type Comment = {
   body: string;
   at: string;
   parentId?: string;
+  stage: Stage;
+  kind: 'Update' | 'Feedback' | 'Decision';
+  resolved: boolean;
+  resolvedAt?: string;
+  resolvedBy?: string;
 };
 export type MetricEntry = {
   id: string;

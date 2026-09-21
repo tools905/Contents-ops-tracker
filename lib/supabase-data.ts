@@ -254,6 +254,22 @@ export async function loadLiveSnapshot(
           author: fallbackPerson(comment.author_id).name,
           initials: fallbackPerson(comment.author_id).initials,
           body: comment.body,
+          stage: stageFromDb[comment.stage],
+          kind:
+            comment.kind === 'feedback'
+              ? 'Feedback'
+              : comment.kind === 'decision'
+                ? 'Decision'
+                : 'Update',
+          resolved: Boolean(comment.resolved_at),
+          resolvedAt: comment.resolved_at
+            ? new Date(comment.resolved_at).toLocaleString('en-IN', {
+                timeZone: 'Asia/Kolkata',
+              })
+            : undefined,
+          resolvedBy: comment.resolved_by
+            ? fallbackPerson(comment.resolved_by).name
+            : undefined,
           at: new Date(comment.created_at).toLocaleTimeString('en-IN', {
             timeZone: 'Asia/Kolkata',
             hour: 'numeric',
@@ -277,7 +293,8 @@ export async function loadLiveSnapshot(
           watchTimeMinutes: Math.round((metric.watch_time_seconds ?? 0) / 60),
           followerChange: metric.follower_change,
           notes: metric.notes ?? undefined,
-          source: metric.source === 'zoho_analytics' ? 'Zoho Analytics' : 'Manual',
+          source:
+            metric.source === 'zoho_analytics' ? 'Zoho Analytics' : 'Manual',
           recordedOn: metric.recorded_on,
         })),
     } as ContentItem;

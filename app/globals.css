@@ -50,7 +50,9 @@
 
 body {
   font-family: 'Plus Jakarta Sans', Inter, ui-sans-serif, system-ui, sans-serif;
-  transition: background-color 160ms ease, color 160ms ease;
+  transition:
+    background-color 160ms ease,
+    color 160ms ease;
 }
 
 :root {
@@ -86,6 +88,22 @@ body {
   --sidebar-accent-foreground: #ffffff;
   --sidebar-border: rgba(255, 255, 255, 0.1);
   --sidebar-ring: #f0a42d;
+  --warning-subtle: #fff4d8;
+  --warning-foreground: #6f4b00;
+  --danger-subtle: #fff0e8;
+  --danger-foreground: #9d3b20;
+  --success-subtle: #e7f4ed;
+  --success-foreground: #276749;
+  --info-subtle: #eaf1f8;
+  --info-foreground: #315d7a;
+  --insider-subtle: #eeebf8;
+  --insider-foreground: #5f4c88;
+  --pipeline-neutral: #eceef2;
+  --pipeline-script: #fbf2dc;
+  --pipeline-shoot: #e9f3f6;
+  --pipeline-production: #f1edf6;
+  --pipeline-upload: #e9f4ef;
+  --checkpoint-foreground: #333852;
 }
 
 .font-display {
@@ -131,6 +149,22 @@ body {
   --sidebar-accent-foreground: #ffffff;
   --sidebar-border: rgba(255, 255, 255, 0.09);
   --sidebar-ring: #f0a42d;
+  --warning-subtle: #3b321d;
+  --warning-foreground: #ffd875;
+  --danger-subtle: #40251f;
+  --danger-foreground: #ffb39c;
+  --success-subtle: #18372f;
+  --success-foreground: #8de0bd;
+  --info-subtle: #1e3445;
+  --info-foreground: #a8d3ee;
+  --insider-subtle: #322b48;
+  --insider-foreground: #cfbdf0;
+  --pipeline-neutral: #1b2039;
+  --pipeline-script: #302a1e;
+  --pipeline-shoot: #192e38;
+  --pipeline-production: #2a2539;
+  --pipeline-upload: #1d332d;
+  --checkpoint-foreground: #f2f3f8;
 }
 
 @layer base {

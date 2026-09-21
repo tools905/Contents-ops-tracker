@@ -1,6 +1,6 @@
 # AAFM India Social Content Operations
 
-One operating system for social content planning, production, approval, publishing and unified performance reporting. The detailed departmental workflow remains grouped under the six familiar headings: Idea → Script → Shoot → Production → Upload → Post-Upload Metrics.
+One operating system for social content planning, production, approval and publishing accountability. The detailed departmental workflow remains grouped under the six familiar headings: Idea → Script → Shoot → Production → Upload → Post-Upload Metrics. Performance reporting itself stays in Zoho Social/Zoho Analytics and is not a standalone tracker section.
 
 The workflow inside those headings is:
 
@@ -24,8 +24,8 @@ Demo edits are held in memory and reset on reload. Live persistence, email deliv
 
 ## Current modes
 
-- Without Supabase environment values, the app opens a fully interactive demonstration workspace with role presets, realistic AAFM India content, reporting snapshots and department requests.
-- With `SUPABASE_URL` and `SUPABASE_PUBLISHABLE_KEY`, it uses invite-only Supabase email/password authentication and the database policies in `supabase/migrations`.
+- Without Supabase environment values, the app opens a fully interactive demonstration workspace with role presets, realistic AAFM India content and department requests. Demonstration changes reset on reload.
+- With `SUPABASE_URL` and `SUPABASE_PUBLISHABLE_KEY`, it uses invite-only Supabase email/password authentication and the database policies in `supabase/migrations`. Vercel may use the equivalent `NEXT_PUBLIC_SUPABASE_URL` and `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY` names.
 
 ## Connect a new Supabase project
 
@@ -33,8 +33,13 @@ Demo edits are held in memory and reset on reload. Live persistence, email deliv
 2. Link this local folder with the Supabase CLI and apply all migrations in `supabase/migrations` in timestamp order.
 3. Add `SUPABASE_URL` and `SUPABASE_PUBLISHABLE_KEY` to the Site runtime environment.
 4. Create or invite the two permanent Owner accounts in Supabase Auth. The database automatically creates their inactive profiles. In the SQL editor, activate those profiles and insert their UUIDs into slots `1` and `2` of `workspace_owners`.
-5. Sign in as either Owner. New Auth users appear under **People & access**, where an Owner can activate the login and assign one or more roles. Admins can run all content workflows, but only the two Owners can change access. Content, metrics and interdepartment requests are protected with role-aware RLS.
-6. Deploy the `send-notifications` Edge Function. Add `RESEND_API_KEY` and `RESEND_FROM_EMAIL` as Edge Function secrets, then schedule an authenticated invocation of that function with Supabase Cron (for example, every 15 minutes). It queues both content due-date reminders and recurring cadence reminders before delivering the email outbox. Keep its authentication secret in Supabase Vault; never expose it in browser code.
+5. Sign in as either Owner. Owners and Admins can invite teammates from **People & access**; only Owners can change existing access. Content, stage-level discussion, metrics and interdepartment requests are protected with role-aware RLS.
+6. Deploy the `invite-user` and `send-notifications` Edge Functions. Add `RESEND_API_KEY` as an Edge Function secret. The default sender is `AAFM Content Ops <notifications@updates.buildablelabs.com>`; override it with `RESEND_FROM_EMAIL` only if needed. Schedule an authenticated invocation of `send-notifications` with Supabase Cron (for example, every 15 minutes). Keep all service credentials in Supabase, never in browser code.
+7. Configure Supabase Auth custom SMTP with the Resend SMTP credentials for the verified `updates.buildablelabs.com` domain. Disable public sign-ups so only Owner/Admin invitations can create logins.
+
+## Stage discussion and feedback
+
+Every comment records its pipeline stage and type: Update, Feedback or Decision. Replies remain linked to their parent comment, open feedback appears in the assigned team member’s action list, and resolving or reopening feedback creates an audit-history entry. This keeps handoffs simple while preserving who said what, where, and when.
 
 Example Owner bootstrap after both Auth users exist (replace the two email values):
 

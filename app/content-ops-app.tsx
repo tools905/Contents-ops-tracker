@@ -118,6 +118,7 @@ import {
   type AppRole,
   type CadenceFrequency,
   type CadenceRun,
+  type Comment,
   type ContentItem,
   type ContentPillar,
   type DepartmentRequest,
@@ -136,13 +137,17 @@ type View =
   | 'raci'
   | 'calendar'
   | 'cadence'
-  | 'reports'
   | 'requests'
   | 'people'
   | 'settings';
 type MoveIntent = { item: ContentItem; toStage: Stage };
 type MetricDraft = Omit<MetricEntry, 'id' | 'source'>;
 type RaciIntent = { item: ContentItem; stage: Stage };
+type InviteDraft = {
+  email: string;
+  fullName: string;
+  roles: Exclude<AppRole, 'Owner'>[];
+};
 type CadenceDraft = {
   id?: string;
   name: string;
@@ -194,7 +199,6 @@ const nav: Array<{ view: View; label: string; icon: typeof LayoutDashboard }> =
     { view: 'raci', label: 'RACI matrix', icon: ShieldCheck },
     { view: 'calendar', label: 'Calendar', icon: CalendarDays },
     { view: 'cadence', label: 'Operating cadence', icon: RefreshCw },
-    { view: 'reports', label: 'Reports', icon: BarChart3 },
     { view: 'requests', label: 'Content requests', icon: MessageSquareText },
     { view: 'people', label: 'People & access', icon: Users2 },
     { view: 'settings', label: 'Settings', icon: Settings2 },
@@ -217,14 +221,13 @@ export default function ContentOpsApp({
   const [items, setItems] = useState<ContentItem[]>(demoItems);
   const [requests, setRequests] = useState<DepartmentRequest[]>(demoRequests);
   const [cadences, setCadences] = useState<OperatingCadence[]>(demoCadences);
-  const [cadenceRuns, setCadenceRuns] =
-    useState<CadenceRun[]>(demoCadenceRuns);
+  const [cadenceRuns, setCadenceRuns] = useState<CadenceRun[]>(demoCadenceRuns);
   const [currentUser, setCurrentUser] = useState<Person>(demoPeople[0]);
   const [currentRole, setCurrentRole] = useState<AppRole>('Owner');
   const [view, setView] = useState<View>('today');
   const [selectedId, setSelectedId] = useState<string>();
   const [createOpen, setCreateOpen] = useState(false);
-  const [metricsOpen, setMetricsOpen] = useState(false);
+  const [inviteOpen, setInviteOpen] = useState(false);
   const [raciIntent, setRaciIntent] = useState<RaciIntent>();
   const [cadenceEditor, setCadenceEditor] = useState<
     OperatingCadence | 'new'
@@ -269,6 +272,10 @@ export default function ContentOpsApp({
     media.addEventListener('change', applyTheme);
     return () => media.removeEventListener('change', applyTheme);
   }, [theme]);
+
+  useEffect(() => {
+    window.scrollTo({ top: 0, left: 0, behavior: 'auto' });
+  }, [view]);
 
   useEffect(() => {
     if (!client) return;
@@ -320,6 +327,7 @@ export default function ContentOpsApp({
     [visibleItems, effectiveRoles, rolePerson],
   );
   const canManageAccess = effectiveRoles.includes('Owner');
+  const canInvitePeople = hasAnyRole(effectiveRoles, ['Owner', 'Admin']);
   const canCreate = hasAnyRole(effectiveRoles, [
     'Owner',
     'Admin',
@@ -340,7 +348,7 @@ export default function ContentOpsApp({
     [cadences, canManageOperations, effectiveRoles, rolePerson.id],
   );
   const visibleNav = nav
-    .filter((entry) => entry.view !== 'people' || canManageAccess)
+    .filter((entry) => entry.view !== 'people' || canInvitePeople)
     .filter(
       (entry) =>
         entry.view !== 'settings' ||
@@ -526,6 +534,37 @@ export default function ContentOpsApp({
     }, `${person.name}'s access was updated.`);
   };
 
+  const inviteUser = async (draft: InviteDraft) => {
+    if (demoMode) {
+      const person: Person = {
+        id: crypto.randomUUID(),
+        name: draft.fullName,
+        email: draft.email,
+        initials: draft.fullName
+          .split(/\s+/)
+          .slice(0, 2)
+          .map((part) => part[0]?.toUpperCase())
+          .join(''),
+        roles: draft.roles,
+        isActive: true,
+      };
+      setPeople((all) => [...all, person]);
+      setInviteOpen(false);
+      return showNotice(`Demo invitation prepared for ${draft.email}.`);
+    }
+    const saved = await mutateLive(async (supabase) => {
+      const { error } = await supabase.functions.invoke('invite-user', {
+        body: {
+          email: draft.email,
+          fullName: draft.fullName,
+          roles: draft.roles.map((role) => roleToDb[role]),
+        },
+      });
+      if (error) throw error;
+    }, `Invitation sent to ${draft.email}.`);
+    if (saved) setInviteOpen(false);
+  };
+
   const requestChanges = async (item: ContentItem, note: string) => {
     if (!note.trim()) return showNotice('Add a short change note first.');
     if (!demoMode)
@@ -597,15 +636,13 @@ export default function ContentOpsApp({
     if (!demoMode)
       return mutateLive(
         async (supabase) => {
-          const { error } = await supabase
-            .from('stage_reviews')
-            .insert({
-              content_item_id: item.id,
-              stage: stageToDb[item.stage],
-              reviewer_id: authUser!.id,
-              decision: approved ? 'approved' : 'changes_requested',
-              note: note || null,
-            });
+          const { error } = await supabase.from('stage_reviews').insert({
+            content_item_id: item.id,
+            stage: stageToDb[item.stage],
+            reviewer_id: authUser!.id,
+            decision: approved ? 'approved' : 'changes_requested',
+            note: note || null,
+          });
           if (error) throw error;
         },
         approved
@@ -627,6 +664,13 @@ export default function ContentOpsApp({
                       initials: rolePerson.initials,
                       body: note,
                       at: 'Just now',
+                      stage: row.stage,
+                      kind: approved
+                        ? ('Decision' as const)
+                        : ('Feedback' as const),
+                      resolved: approved,
+                      resolvedAt: approved ? 'Just now' : undefined,
+                      resolvedBy: approved ? rolePerson.name : undefined,
                     },
                   ]
                 : row.comments,
@@ -644,20 +688,22 @@ export default function ContentOpsApp({
   const addComment = async (
     item: ContentItem,
     body: string,
+    kind: Comment['kind'],
+    stage: Stage,
     parentId?: string,
   ) => {
     if (!body.trim()) return;
     if (!demoMode)
       return mutateLive(async (supabase) => {
-        const { error } = await supabase
-          .from('comments')
-          .insert({
-            content_item_id: item.id,
-            parent_id: parentId ? Number(parentId) : null,
-            author_id: authUser!.id,
-            body: body.trim(),
-            mentioned_profile_ids: [],
-          });
+        const { error } = await supabase.from('comments').insert({
+          content_item_id: item.id,
+          parent_id: parentId ? Number(parentId) : null,
+          author_id: authUser!.id,
+          body: body.trim(),
+          stage: stageToDb[stage],
+          kind: kind.toLowerCase(),
+          mentioned_profile_ids: [],
+        });
         if (error) throw error;
       }, 'Comment added.');
     setItems((all) =>
@@ -674,6 +720,9 @@ export default function ContentOpsApp({
                   body: body.trim(),
                   at: 'Just now',
                   parentId,
+                  stage,
+                  kind,
+                  resolved: false,
                 },
               ],
             }
@@ -683,35 +732,68 @@ export default function ContentOpsApp({
     showNotice('Comment added.');
   };
 
-  const addMetric = async (
+  const setCommentResolution = async (
     item: ContentItem,
-    values: MetricDraft,
+    commentId: string,
+    resolved: boolean,
   ) => {
     if (!demoMode)
+      return mutateLive(
+        async (supabase) => {
+          const { error } = await supabase.rpc('set_comment_resolution', {
+            p_comment_id: Number(commentId),
+            p_resolved: resolved,
+          });
+          if (error) throw error;
+        },
+        resolved ? 'Feedback resolved.' : 'Feedback reopened.',
+      );
+    setItems((all) =>
+      all.map((row) =>
+        row.id === item.id
+          ? {
+              ...row,
+              comments: row.comments.map((entry) =>
+                entry.id === commentId
+                  ? {
+                      ...entry,
+                      resolved,
+                      resolvedAt: resolved ? 'Just now' : undefined,
+                      resolvedBy: resolved ? rolePerson.name : undefined,
+                    }
+                  : entry,
+              ),
+            }
+          : row,
+      ),
+    );
+    showNotice(resolved ? 'Feedback resolved.' : 'Feedback reopened.');
+  };
+
+  const addMetric = async (item: ContentItem, values: MetricDraft) => {
+    if (!demoMode)
       return mutateLive(async (supabase) => {
-        const { error } = await supabase
-          .from('metrics_entries')
-          .upsert(
-            {
-              content_item_id: item.id,
-              platform: values.platform,
-              content_url: values.contentUrl || null,
-              views: values.views,
-              reach: values.reach,
-              impressions: values.impressions,
-              likes: values.likes,
-              comments: values.comments,
-              shares: values.shares,
-              saves: values.saves,
-              watch_time_seconds: values.watchTimeMinutes * 60,
-              follower_change: values.followerChange,
-              notes: values.notes || null,
-              recorded_on: values.recordedOn,
-              recorded_by: authUser!.id,
-              source: 'manual',
-            },
-            { onConflict: 'content_item_id,platform,recorded_on,source' },
-          );
+        const { error } = await supabase.from('metrics_entries').upsert(
+          {
+            content_item_id: item.id,
+            platform: values.platform,
+            content_url: values.contentUrl || null,
+            views: values.views,
+            reach: values.reach,
+            impressions: values.impressions,
+            likes: values.likes,
+            comments: values.comments,
+            shares: values.shares,
+            saves: values.saves,
+            watch_time_seconds: values.watchTimeMinutes * 60,
+            follower_change: values.followerChange,
+            notes: values.notes || null,
+            recorded_on: values.recordedOn,
+            recorded_by: authUser!.id,
+            source: 'manual',
+          },
+          { onConflict: 'content_item_id,platform,recorded_on,source' },
+        );
         if (error) throw error;
       }, 'Metrics snapshot saved.');
     setItems((all) =>
@@ -754,7 +836,9 @@ export default function ContentOpsApp({
           p_content_type: draft.contentType,
           p_platform: draft.platform,
           p_pillar: pillarToDb[draft.pillar],
-          p_due_at: draft.dueAt ? new Date(`${draft.dueAt}:00+05:30`).toISOString() : null,
+          p_due_at: draft.dueAt
+            ? new Date(`${draft.dueAt}:00+05:30`).toISOString()
+            : null,
           p_responsible_id: draft.responsibleId,
           p_accountable_ids: draft.accountableIds,
           p_consulted_ids: draft.consultedIds,
@@ -806,7 +890,9 @@ export default function ContentOpsApp({
         workflowStep: STAGE_STEPS.Idea[0],
         stage: 'Idea',
         status: 'In progress',
-        dueAt: draft.dueAt ? new Date(`${draft.dueAt}:00+05:30`).toISOString() : undefined,
+        dueAt: draft.dueAt
+          ? new Date(`${draft.dueAt}:00+05:30`).toISOString()
+          : undefined,
         reminderHours: 24,
         lifecycle: 'Active',
         responsible,
@@ -833,16 +919,14 @@ export default function ContentOpsApp({
   ) => {
     if (!demoMode)
       return mutateLive(async (supabase) => {
-        const { error } = await supabase
-          .from('department_requests')
-          .insert({
-            department: request.department,
-            requester_name: request.requester,
-            request_text: request.request,
-            priority: request.priority.toLowerCase(),
-            needed_by: request.neededBy,
-            created_by: authUser!.id,
-          });
+        const { error } = await supabase.from('department_requests').insert({
+          department: request.department,
+          requester_name: request.requester,
+          request_text: request.request,
+          priority: request.priority.toLowerCase(),
+          needed_by: request.neededBy,
+          created_by: authUser!.id,
+        });
         if (error) throw error;
       }, 'Content request submitted.');
     setRequests((all) => [
@@ -909,24 +993,28 @@ export default function ContentOpsApp({
       draft.participantIds.includes(person.id),
     );
     if (!demoMode) {
-      const saved = await mutateLive(async (supabase) => {
-        const { error } = await supabase.rpc('save_operating_cadence', {
-          p_cadence_id: draft.id ?? null,
-          p_name: draft.name,
-          p_purpose: draft.purpose,
-          p_frequency: draft.frequency.toLowerCase(),
-          p_weekday: draft.frequency === 'Weekly' ? draft.weekday : null,
-          p_day_of_month: draft.frequency === 'Monthly' ? draft.dayOfMonth : null,
-          p_time: draft.time,
-          p_owner_id: draft.ownerId,
-          p_stage: draft.stage ? stageToDb[draft.stage] : null,
-          p_deliverable: draft.deliverable,
-          p_reminder_hours: draft.reminderHours,
-          p_is_active: draft.active,
-          p_participant_ids: draft.participantIds,
-        });
-        if (error) throw error;
-      }, draft.id ? 'Cadence updated.' : 'Recurring cadence created.');
+      const saved = await mutateLive(
+        async (supabase) => {
+          const { error } = await supabase.rpc('save_operating_cadence', {
+            p_cadence_id: draft.id ?? null,
+            p_name: draft.name,
+            p_purpose: draft.purpose,
+            p_frequency: draft.frequency.toLowerCase(),
+            p_weekday: draft.frequency === 'Weekly' ? draft.weekday : null,
+            p_day_of_month:
+              draft.frequency === 'Monthly' ? draft.dayOfMonth : null,
+            p_time: draft.time,
+            p_owner_id: draft.ownerId,
+            p_stage: draft.stage ? stageToDb[draft.stage] : null,
+            p_deliverable: draft.deliverable,
+            p_reminder_hours: draft.reminderHours,
+            p_is_active: draft.active,
+            p_participant_ids: draft.participantIds,
+          });
+          if (error) throw error;
+        },
+        draft.id ? 'Cadence updated.' : 'Recurring cadence created.',
+      );
       if (saved) setCadenceEditor(undefined);
       return;
     }
@@ -937,8 +1025,7 @@ export default function ContentOpsApp({
       purpose: draft.purpose,
       frequency: draft.frequency,
       weekday: draft.frequency === 'Weekly' ? draft.weekday : undefined,
-      dayOfMonth:
-        draft.frequency === 'Monthly' ? draft.dayOfMonth : undefined,
+      dayOfMonth: draft.frequency === 'Monthly' ? draft.dayOfMonth : undefined,
       time: draft.time,
       timezone: 'Asia/Kolkata',
       owner,
@@ -959,18 +1046,19 @@ export default function ContentOpsApp({
 
   const toggleCadence = async (cadence: OperatingCadence) => {
     if (!demoMode)
-      return mutateLive(async (supabase) => {
-        const { error } = await supabase
-          .from('operating_cadences')
-          .update({ is_active: !cadence.active })
-          .eq('id', cadence.id);
-        if (error) throw error;
-      }, cadence.active ? 'Cadence paused.' : 'Cadence activated.');
+      return mutateLive(
+        async (supabase) => {
+          const { error } = await supabase
+            .from('operating_cadences')
+            .update({ is_active: !cadence.active })
+            .eq('id', cadence.id);
+          if (error) throw error;
+        },
+        cadence.active ? 'Cadence paused.' : 'Cadence activated.',
+      );
     setCadences((all) =>
       all.map((entry) =>
-        entry.id === cadence.id
-          ? { ...entry, active: !entry.active }
-          : entry,
+        entry.id === cadence.id ? { ...entry, active: !entry.active } : entry,
       ),
     );
     showNotice(cadence.active ? 'Cadence paused.' : 'Cadence activated.');
@@ -997,10 +1085,7 @@ export default function ContentOpsApp({
     setCadenceRuns((all) => [
       ...all.filter(
         (run) =>
-          !(
-            run.cadenceId === cadence.id &&
-            run.scheduledFor === scheduledFor
-          ),
+          !(run.cadenceId === cadence.id && run.scheduledFor === scheduledFor),
       ),
       {
         cadenceId: cadence.id,
@@ -1190,7 +1275,7 @@ export default function ContentOpsApp({
               className="hidden h-8 w-auto sm:block"
             />
             <div className="hidden border-l border-border pl-3 lg:block">
-              <p className="text-xs font-semibold uppercase tracking-[0.14em] text-[#7a5200]">
+              <p className="text-xs font-semibold uppercase tracking-[0.14em] text-[var(--warning-foreground)]">
                 Content operations
               </p>
               <p className="text-sm text-muted-foreground">Asia/Kolkata</p>
@@ -1264,7 +1349,18 @@ export default function ContentOpsApp({
                 <Monitor />
               )}
             </Button>
-            <Button variant="outline" size="icon" aria-label="Notifications" onClick={() => showNotice(myActions.length ? `${myActions.length} action${myActions.length === 1 ? '' : 's'} need your attention.` : 'You are all caught up.')}>
+            <Button
+              variant="outline"
+              size="icon"
+              aria-label="Notifications"
+              onClick={() =>
+                showNotice(
+                  myActions.length
+                    ? `${myActions.length} action${myActions.length === 1 ? '' : 's'} need your attention.`
+                    : 'You are all caught up.',
+                )
+              }
+            >
               <Bell />
             </Button>
             {canCreate && (
@@ -1343,18 +1439,6 @@ export default function ContentOpsApp({
               onComplete={completeCadenceRun}
             />
           )}
-          {view === 'reports' && (
-            <Reports
-              items={visibleItems}
-              canAdd={hasAnyRole(effectiveRoles, [
-                'Owner',
-                'Admin',
-                'Monitoring',
-              ])}
-              onAdd={() => setMetricsOpen(true)}
-              onOpen={(id) => setSelectedId(id)}
-            />
-          )}
           {view === 'requests' && (
             <Requests
               requests={requests}
@@ -1366,6 +1450,8 @@ export default function ContentOpsApp({
             <People
               people={people}
               demoMode={demoMode}
+              canManageAccess={canManageAccess}
+              onInvite={() => setInviteOpen(true)}
               onManage={manageAccess}
             />
           )}
@@ -1378,11 +1464,10 @@ export default function ContentOpsApp({
         people={people}
         onCreate={createItem}
       />
-      <MetricsDialog
-        open={metricsOpen}
-        onOpenChange={setMetricsOpen}
-        items={visibleItems.filter((item) => Boolean(item.publishedAt))}
-        onSave={addMetric}
+      <InviteUserDialog
+        open={inviteOpen}
+        onOpenChange={setInviteOpen}
+        onInvite={inviteUser}
       />
       <ItemDetail
         open={Boolean(selected)}
@@ -1396,6 +1481,7 @@ export default function ContentOpsApp({
         onApprove={approve}
         onRequestChanges={requestChanges}
         onComment={addComment}
+        onResolveComment={setCommentResolution}
         onMetric={addMetric}
       />
       <RaciDialog
@@ -1442,7 +1528,12 @@ function dashboardScope(roles: AppRole[]) {
 function isAssigned(
   item: ContentItem,
   person: Person,
-  kind: 'responsible' | 'accountable' | 'consulted' | 'informed' | 'either' = 'either',
+  kind:
+    | 'responsible'
+    | 'accountable'
+    | 'consulted'
+    | 'informed'
+    | 'either' = 'either',
 ) {
   const assigned =
     kind === 'responsible'
@@ -1453,11 +1544,19 @@ function isAssigned(
           ? item.consulted
           : kind === 'informed'
             ? item.informed
-            : [...item.responsible, ...item.accountable, ...item.consulted, ...item.informed];
+            : [
+                ...item.responsible,
+                ...item.accountable,
+                ...item.consulted,
+                ...item.informed,
+              ];
   return assigned.some((owner) => owner.id === person.id);
 }
 function canSubmitItem(item: ContentItem, roles: AppRole[], person: Person) {
-  return hasAnyRole(roles, ['Owner', 'Admin']) || isAssigned(item, person, 'responsible');
+  return (
+    hasAnyRole(roles, ['Owner', 'Admin']) ||
+    isAssigned(item, person, 'responsible')
+  );
 }
 function canApproveItem(item: ContentItem, roles: AppRole[], person: Person) {
   return (
@@ -1484,7 +1583,13 @@ function filterForRoles(
 
 type ActionItem = {
   item: ContentItem;
-  kind: 'approval' | 'second-lens' | 'metrics' | 'work' | 'consultation';
+  kind:
+    | 'approval'
+    | 'second-lens'
+    | 'metrics'
+    | 'work'
+    | 'consultation'
+    | 'feedback';
   label: string;
   priority: number;
 };
@@ -1496,6 +1601,24 @@ function getMyActions(
   const elevated = hasAnyRole(roles, ['Owner', 'Admin']);
   const actions: ActionItem[] = [];
   for (const item of items.filter((row) => row.lifecycle === 'Active')) {
+    const openFeedback = item.comments.filter(
+      (comment) =>
+        comment.kind === 'Feedback' &&
+        !comment.resolved &&
+        comment.stage === item.stage,
+    ).length;
+    if (
+      openFeedback > 0 &&
+      (elevated ||
+        isAssigned(item, person, 'responsible') ||
+        isAssigned(item, person, 'accountable'))
+    )
+      actions.push({
+        item,
+        kind: 'feedback',
+        label: `${openFeedback} open feedback ${openFeedback === 1 ? 'item' : 'items'} to close`,
+        priority: 1,
+      });
     if (isAssigned(item, person, 'consulted'))
       actions.push({
         item,
@@ -1615,8 +1738,7 @@ function getCadenceOccurrences(cadences: OperatingCadence[], days: number) {
     for (const cadence of cadences.filter((entry) => entry.active)) {
       const matches =
         (cadence.frequency === 'Weekly' && cadence.weekday === dayOfWeek) ||
-        (cadence.frequency === 'Monthly' &&
-          cadence.dayOfMonth === dayOfMonth);
+        (cadence.frequency === 'Monthly' && cadence.dayOfMonth === dayOfMonth);
       if (!matches) continue;
       const scheduledFor = new Date(
         `${key}T${cadence.time}:00+05:30`,
@@ -1680,13 +1802,13 @@ function Owners({ people }: { people: Person[] }) {
         <div
           key={person.id}
           title={person.name}
-          className="grid size-7 place-items-center rounded-full border-2 border-white bg-[#eceef7] text-[10px] font-bold text-card-foreground"
+          className="grid size-7 place-items-center rounded-full border-2 border-card bg-muted text-[10px] font-bold text-card-foreground"
         >
           {person.initials}
         </div>
       ))}
       {people.length > 3 && (
-        <div className="grid size-7 place-items-center rounded-full border-2 border-white bg-[#1f2342] text-[10px] text-white">
+        <div className="grid size-7 place-items-center rounded-full border-2 border-card bg-[#30375f] text-[10px] text-white">
           +{people.length - 3}
         </div>
       )}
@@ -1696,19 +1818,19 @@ function Owners({ people }: { people: Person[] }) {
 function StatusBadge({ item }: { item: ContentItem }) {
   const cls =
     item.status === 'Pending approval'
-      ? 'bg-[#f7efdd] text-[#7a5200]'
+      ? 'bg-[var(--warning-subtle)] text-[var(--warning-foreground)]'
       : item.status === 'Changes requested'
-        ? 'bg-[#fff0e8] text-[#b34726]'
-        : 'bg-[#eceef7] text-card-foreground';
+        ? 'bg-[var(--danger-subtle)] text-[var(--danger-foreground)]'
+        : 'bg-muted text-card-foreground';
   return <Badge className={cls}>{item.status}</Badge>;
 }
 function PillarBadge({ pillar }: { pillar: ContentPillar }) {
   const cls =
     pillar === 'Knowledge'
-      ? 'bg-[#eaf1f8] text-[#315d7a]'
+      ? 'bg-[var(--info-subtle)] text-[var(--info-foreground)]'
       : pillar === 'Promotional'
-        ? 'bg-[#fff0e8] text-[#a74325]'
-        : 'bg-[#eeebf8] text-[#5f4c88]';
+        ? 'bg-[var(--danger-subtle)] text-[var(--danger-foreground)]'
+        : 'bg-[var(--insider-subtle)] text-[var(--insider-foreground)]';
   return <Badge className={cls}>{pillar}</Badge>;
 }
 function PageTitle({
@@ -1765,7 +1887,7 @@ function MetricCard({
         </CardDescription>
         <CardAction>
           <div
-            className={`grid size-9 place-items-center rounded-lg ${warning ? 'bg-[#fff0e8] text-[#b34726]' : accent ? 'bg-card/10 text-[#f0c254]' : 'bg-[#f7efdd] text-[#9a6908]'}`}
+            className={`grid size-9 place-items-center rounded-lg ${warning ? 'bg-[var(--danger-subtle)] text-[var(--danger-foreground)]' : accent ? 'bg-card/10 text-[#f0c254]' : 'bg-[var(--warning-subtle)] text-[var(--warning-foreground)]'}`}
           >
             <Icon className="size-4" />
           </div>
@@ -1778,7 +1900,7 @@ function MetricCard({
           {value}
         </p>
         <p
-          className={`mt-2 text-xs ${accent ? 'text-white/45' : warning ? 'text-[#b34726]' : 'text-muted-foreground'}`}
+          className={`mt-2 text-xs ${accent ? 'text-white/60' : warning ? 'text-[var(--danger-foreground)]' : 'text-muted-foreground'}`}
         >
           {detail}
         </p>
@@ -1805,17 +1927,19 @@ function Today({
   cadenceRuns: CadenceRun[];
   onOpen: (id: string) => void;
   onReview: (item: ContentItem, approved: boolean, note: string) => void;
-  onSaveMetric: (
-    item: ContentItem,
-    values: MetricDraft,
-  ) => void;
+  onSaveMetric: (item: ContentItem, values: MetricDraft) => void;
   setView: (view: View) => void;
 }) {
   const active = items.filter((item) => item.lifecycle === 'Active');
   const approvals = actions.filter(
     (action) => action.kind === 'approval' || action.kind === 'second-lens',
   );
-  const assigned = actions.filter((action) => action.kind === 'work' || action.kind === 'consultation');
+  const assigned = actions.filter(
+    (action) =>
+      action.kind === 'work' ||
+      action.kind === 'consultation' ||
+      action.kind === 'feedback',
+  );
   const metrics = actions.filter((action) => action.kind === 'metrics');
   const overdue = active.filter(isOverdue);
   return (
@@ -1939,16 +2063,30 @@ function Today({
             </CardHeader>
             <CardContent className="space-y-3">
               {getCadenceOccurrences(cadences, 30)
-                .filter(({ cadence, scheduledFor }) => !cadenceRuns.some((run) => run.cadenceId === cadence.id && run.scheduledFor === scheduledFor && run.status === 'Complete'))
+                .filter(
+                  ({ cadence, scheduledFor }) =>
+                    !cadenceRuns.some(
+                      (run) =>
+                        run.cadenceId === cadence.id &&
+                        run.scheduledFor === scheduledFor &&
+                        run.status === 'Complete',
+                    ),
+                )
                 .slice(0, 1)
                 .map(({ cadence, scheduledFor }) => (
                   <div key={cadence.id}>
                     <p className="text-sm font-semibold">{cadence.name}</p>
-                    <p className="mt-1 text-sm text-muted-foreground">{formatCadenceDate(scheduledFor)}</p>
-                    <p className="mt-2 text-sm text-muted-foreground">{cadence.deliverable}</p>
+                    <p className="mt-1 text-sm text-muted-foreground">
+                      {formatCadenceDate(scheduledFor)}
+                    </p>
+                    <p className="mt-2 text-sm text-muted-foreground">
+                      {cadence.deliverable}
+                    </p>
                   </div>
                 ))}
-              <Button variant="outline" onClick={() => setView('cadence')}>Open cadence <ChevronRight /></Button>
+              <Button variant="outline" onClick={() => setView('cadence')}>
+                Open cadence <ChevronRight />
+              </Button>
             </CardContent>
           </Card>
           <Card className="bg-[#202546] text-white ring-0">
@@ -2004,8 +2142,8 @@ function Today({
               <div className="rounded-xl border bg-muted/60 p-3">
                 {dashboardScope(roles)}
               </div>
-              <Button variant="outline" onClick={() => setView('reports')}>
-                Open your reports <ChevronRight />
+              <Button variant="outline" onClick={() => setView('pipeline')}>
+                Open content pipeline <ChevronRight />
               </Button>
             </CardContent>
           </Card>
@@ -2031,7 +2169,9 @@ function ActionRow({
     >
       <div className="min-w-0">
         <div className="mb-1.5 flex flex-wrap gap-2">
-          <Badge className="bg-[#f7efdd] text-[#74500a]">{label}</Badge>
+          <Badge className="bg-[var(--warning-subtle)] text-[var(--warning-foreground)]">
+            {label}
+          </Badge>
           {isOverdue(item) && <Badge variant="destructive">Overdue</Badge>}
         </div>
         <p className="truncate text-sm font-semibold text-card-foreground">
@@ -2081,7 +2221,9 @@ function ItemTable({
           >
             <TableCell className="min-w-[250px]">
               <p className="font-medium text-card-foreground">{item.title}</p>
-              <p className="mt-1 text-xs text-muted-foreground">{item.contentType}</p>
+              <p className="mt-1 text-xs text-muted-foreground">
+                {item.contentType}
+              </p>
             </TableCell>
             <TableCell>
               <div className="space-y-2">
@@ -2095,7 +2237,7 @@ function ItemTable({
             <TableCell
               className={
                 isOverdue(item)
-                  ? 'font-medium text-[#b34726]'
+                  ? 'font-medium text-[var(--danger-foreground)]'
                   : 'text-muted-foreground'
               }
             >
@@ -2122,12 +2264,12 @@ function Pipeline({
   onMove: (item: ContentItem, stage: Stage) => void;
 }) {
   const stageStyles = [
-    'border-t-[#77809b] bg-muted',
-    'border-t-[#dfa126] bg-[#fbf2dc]',
-    'border-t-[#4e91ad] bg-[#e9f3f6]',
-    'border-t-[#8b70ab] bg-[#f1edf6]',
-    'border-t-[#3b9171] bg-[#e9f4ef]',
-    'border-t-[#1f2342] bg-muted',
+    'border-t-[#77809b] bg-[var(--pipeline-neutral)]',
+    'border-t-[#dfa126] bg-[var(--pipeline-script)]',
+    'border-t-[#4e91ad] bg-[var(--pipeline-shoot)]',
+    'border-t-[#8b70ab] bg-[var(--pipeline-production)]',
+    'border-t-[#3b9171] bg-[var(--pipeline-upload)]',
+    'border-t-[#77809b] bg-[var(--pipeline-neutral)]',
   ];
   return (
     <>
@@ -2165,7 +2307,7 @@ function Pipeline({
               >
                 <div className="mb-3 flex items-center justify-between px-1 py-1">
                   <div className="min-w-0">
-                    <p className="text-xs font-semibold text-[#9b6908]">
+                    <p className="text-xs font-semibold text-[var(--warning-foreground)]">
                       0{index + 1}
                     </p>
                     <h2 className="mt-0.5 text-base font-semibold text-card-foreground">
@@ -2186,6 +2328,12 @@ function Pipeline({
                         ? canApproveItem(item, roles, person)
                         : canSubmitItem(item, roles, person);
                     const next = PIPELINE[index + 1];
+                    const openFeedback = item.comments.filter(
+                      (comment) =>
+                        comment.stage === item.stage &&
+                        comment.kind === 'Feedback' &&
+                        !comment.resolved,
+                    ).length;
                     return (
                       <article
                         key={item.id}
@@ -2223,19 +2371,24 @@ function Pipeline({
                         <div className="mt-3 flex flex-wrap gap-1.5">
                           <PillarBadge pillar={item.pillar} />
                           <StatusBadge item={item} />
+                          {openFeedback > 0 && (
+                            <Badge variant="destructive">
+                              {openFeedback} open feedback
+                            </Badge>
+                          )}
                         </div>
                         <div className="mt-3 rounded-lg bg-muted px-2.5 py-2">
-                          <p className="text-[10px] font-semibold uppercase tracking-wide text-[#8a6a25]">
+                          <p className="text-[11px] font-semibold uppercase tracking-wide text-[var(--warning-foreground)]">
                             Current checkpoint
                           </p>
-                          <p className="mt-0.5 text-xs font-medium text-[#333852]">
+                          <p className="mt-0.5 text-sm font-medium text-[var(--checkpoint-foreground)]">
                             {item.workflowStep}
                           </p>
                         </div>
                         <div className="mt-4 flex items-center justify-between gap-2">
                           <Owners people={item.accountable} />
                           <span
-                            className={`flex items-center gap-1 text-xs ${isOverdue(item) ? 'font-semibold text-[#b34726]' : 'text-muted-foreground'}`}
+                            className={`flex items-center gap-1 text-xs ${isOverdue(item) ? 'font-semibold text-[var(--danger-foreground)]' : 'text-muted-foreground'}`}
                           >
                             <Clock3 className="size-3.5" />
                             {dueLabel(item)}
@@ -2347,7 +2500,8 @@ function RaciMatrix({
           <div>
             <CardTitle>Stage-by-stage comparison</CardTitle>
             <CardDescription>
-              Responsible and Accountable are required; Consulted and Informed make collaboration explicit.
+              Responsible and Accountable are required; Consulted and Informed
+              make collaboration explicit.
             </CardDescription>
           </div>
           {items.length > 0 && (
@@ -2393,21 +2547,37 @@ function RaciMatrix({
                         >
                           <p className="font-semibold">{stage}</p>
                           <p className="mt-1 text-xs text-muted-foreground">
-                            {stage === item.stage ? 'Current stage' : STAGE_STEPS[stage][0]}
+                            {stage === item.stage
+                              ? 'Current stage'
+                              : STAGE_STEPS[stage][0]}
                           </p>
                         </button>
                       </TableCell>
-                      <TableCell><RaciPeople people={assignment.responsible} /></TableCell>
-                      <TableCell><RaciPeople people={assignment.accountable} /></TableCell>
-                      <TableCell><RaciPeople people={assignment.consulted} /></TableCell>
-                      <TableCell><RaciPeople people={assignment.informed} /></TableCell>
+                      <TableCell>
+                        <RaciPeople people={assignment.responsible} />
+                      </TableCell>
+                      <TableCell>
+                        <RaciPeople people={assignment.accountable} />
+                      </TableCell>
+                      <TableCell>
+                        <RaciPeople people={assignment.consulted} />
+                      </TableCell>
+                      <TableCell>
+                        <RaciPeople people={assignment.informed} />
+                      </TableCell>
                       <TableCell className="min-w-28 text-right">
                         {canManage ? (
-                          <Button variant="outline" size="sm" onClick={() => onEdit(item, stage)}>
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            onClick={() => onEdit(item, stage)}
+                          >
                             Edit
                           </Button>
                         ) : (
-                          <Badge variant={complete ? 'secondary' : 'destructive'}>
+                          <Badge
+                            variant={complete ? 'secondary' : 'destructive'}
+                          >
                             {complete ? 'Complete' : 'Gap'}
                           </Badge>
                         )}
@@ -2430,7 +2600,11 @@ function RaciPeople({ people }: { people: Person[] }) {
   return people.length ? (
     <div className="flex min-w-40 flex-wrap gap-1.5">
       {people.map((person) => (
-        <Badge key={person.id} variant="outline" className="bg-card font-normal">
+        <Badge
+          key={person.id}
+          variant="outline"
+          className="bg-card font-normal"
+        >
           {person.name}
         </Badge>
       ))}
@@ -2476,7 +2650,7 @@ function ContentCalendar({
           return (
             <div
               key={key}
-              className={`rounded-xl border p-3 ${index === 0 ? 'border-[#dfa126] bg-[#fff8e8]' : 'border-border bg-card'}`}
+              className={`rounded-xl border p-3 ${index === 0 ? 'border-[#dfa126] bg-[var(--warning-subtle)]' : 'border-border bg-card'}`}
             >
               <p className="text-xs font-medium text-muted-foreground">
                 {new Intl.DateTimeFormat('en-IN', {
@@ -2531,12 +2705,14 @@ function ContentCalendar({
                   onClick={() => onOpen(item.id)}
                 >
                   <TableCell
-                    className={`min-w-32 ${isOverdue(item) ? 'font-semibold text-[#b34726]' : ''}`}
+                    className={`min-w-32 ${isOverdue(item) ? 'font-semibold text-[var(--danger-foreground)]' : ''}`}
                   >
                     {dueLabel(item)}
                   </TableCell>
                   <TableCell className="min-w-64">
-                    <p className="font-medium text-card-foreground">{item.title}</p>
+                    <p className="font-medium text-card-foreground">
+                      {item.title}
+                    </p>
                     <p className="mt-1 text-xs text-muted-foreground">
                       {item.platform} · {item.contentType}
                     </p>
@@ -2546,7 +2722,9 @@ function ContentCalendar({
                   </TableCell>
                   <TableCell className="min-w-44">
                     <p className="text-sm font-medium">{item.workflowStep}</p>
-                    <p className="mt-1 text-xs text-muted-foreground">{item.stage}</p>
+                    <p className="mt-1 text-xs text-muted-foreground">
+                      {item.stage}
+                    </p>
                   </TableCell>
                   <TableCell>
                     <Owners people={item.responsible} />
@@ -2561,7 +2739,8 @@ function ContentCalendar({
         <CardHeader>
           <CardTitle>Operating cadence</CardTitle>
           <CardDescription>
-            Recurring planning, approvals and reporting alongside content deadlines
+            Recurring planning, approvals and reporting alongside content
+            deadlines
           </CardDescription>
         </CardHeader>
         <CardContent className="grid gap-3 md:grid-cols-2">
@@ -2582,7 +2761,9 @@ function ContentCalendar({
                     {formatCadenceDate(scheduledFor)} · {cadence.owner.name}
                   </p>
                 </div>
-                <Badge variant={run?.status === 'Complete' ? 'secondary' : 'outline'}>
+                <Badge
+                  variant={run?.status === 'Complete' ? 'secondary' : 'outline'}
+                >
                   {run?.status ?? 'Upcoming'}
                 </Badge>
               </div>
@@ -2618,13 +2799,17 @@ function OperatingCadenceView({
 }) {
   const occurrences = getCadenceOccurrences(cadences, 45);
   const upcoming = occurrences.slice(0, 10);
-  const completed = cadenceRuns.filter((run) => run.status === 'Complete').length;
+  const completed = cadenceRuns.filter(
+    (run) => run.status === 'Complete',
+  ).length;
   const thisWeek = occurrences.filter(
     ({ scheduledFor }) =>
       new Date(scheduledFor).getTime() <= Date.now() + 7 * 24 * 3600_000,
   ).length;
   const stageCoverage = new Set(
-    cadences.filter((cadence) => cadence.active && cadence.stage).map((cadence) => cadence.stage),
+    cadences
+      .filter((cadence) => cadence.active && cadence.stage)
+      .map((cadence) => cadence.stage),
   ).size;
   return (
     <>
@@ -2673,7 +2858,8 @@ function OperatingCadenceView({
           <CardHeader>
             <CardTitle>Next checkpoints</CardTitle>
             <CardDescription>
-              Generated automatically from active recurrence rules in Asia/Kolkata
+              Generated automatically from active recurrence rules in
+              Asia/Kolkata
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-3">
@@ -2698,14 +2884,19 @@ function OperatingCadenceView({
                     <div>
                       <div className="flex flex-wrap items-center gap-2">
                         <p className="text-sm font-semibold">{cadence.name}</p>
-                        {cadence.stage && <Badge variant="outline">{cadence.stage}</Badge>}
+                        {cadence.stage && (
+                          <Badge variant="outline">{cadence.stage}</Badge>
+                        )}
                       </div>
                       <p className="mt-1 text-xs text-muted-foreground">
-                        {formatCadenceDate(scheduledFor)} · Owner {cadence.owner.name}
+                        {formatCadenceDate(scheduledFor)} · Owner{' '}
+                        {cadence.owner.name}
                       </p>
                     </div>
                     {run?.status === 'Complete' ? (
-                      <Badge className="bg-[#e7f4ed] text-[#276749]">Complete</Badge>
+                      <Badge className="bg-[var(--success-subtle)] text-[var(--success-foreground)]">
+                        Complete
+                      </Badge>
                     ) : canComplete ? (
                       <Button
                         size="sm"
@@ -2719,13 +2910,17 @@ function OperatingCadenceView({
                     )}
                   </div>
                   <p className="mt-3 text-sm text-muted-foreground">
-                    <strong className="text-card-foreground">Deliverable:</strong>{' '}
+                    <strong className="text-card-foreground">
+                      Deliverable:
+                    </strong>{' '}
                     {cadence.deliverable}
                   </p>
                 </div>
               );
             })}
-            {!upcoming.length && <EmptyState text="No active cadence is scheduled." />}
+            {!upcoming.length && (
+              <EmptyState text="No active cadence is scheduled." />
+            )}
           </CardContent>
         </Card>
 
@@ -2738,10 +2933,26 @@ function OperatingCadenceView({
           </CardHeader>
           <CardContent className="space-y-4">
             {[
-              ['Plan', 'Research, HOD input and weekly/monthly calendar decisions', 'Idea'],
-              ['Approve', 'Compliance, quality control and final brand approval', 'Production'],
-              ['Publish', 'Platform readiness, live links and owner handoff', 'Upload'],
-              ['Learn', 'Weekly pulse, monthly analytics and learning notes', 'Post-Upload Metrics'],
+              [
+                'Plan',
+                'Research, HOD input and weekly/monthly calendar decisions',
+                'Idea',
+              ],
+              [
+                'Approve',
+                'Compliance, quality control and final brand approval',
+                'Production',
+              ],
+              [
+                'Publish',
+                'Platform readiness, live links and owner handoff',
+                'Upload',
+              ],
+              [
+                'Learn',
+                'Weekly pulse, monthly analytics and learning notes',
+                'Post-Upload Metrics',
+              ],
             ].map(([label, detail, stage], index) => {
               const linked = cadences.filter(
                 (cadence) => cadence.active && cadence.stage === stage,
@@ -2754,11 +2965,17 @@ function OperatingCadenceView({
                   <div>
                     <div className="flex flex-wrap items-center gap-2">
                       <p className="text-sm font-semibold">{label}</p>
-                      <Badge variant={linked.length ? 'secondary' : 'destructive'}>
-                        {linked.length ? `${linked.length} linked` : 'Needs cadence'}
+                      <Badge
+                        variant={linked.length ? 'secondary' : 'destructive'}
+                      >
+                        {linked.length
+                          ? `${linked.length} linked`
+                          : 'Needs cadence'}
                       </Badge>
                     </div>
-                    <p className="mt-1 text-sm text-muted-foreground">{detail}</p>
+                    <p className="mt-1 text-sm text-muted-foreground">
+                      {detail}
+                    </p>
                   </div>
                 </div>
               );
@@ -2771,7 +2988,8 @@ function OperatingCadenceView({
         <CardHeader>
           <CardTitle>Recurring cadence configuration</CardTitle>
           <CardDescription>
-            Admins control recurrence, owners, participants, reminders and deliverables.
+            Admins control recurrence, owners, participants, reminders and
+            deliverables.
           </CardDescription>
         </CardHeader>
         <CardContent className="overflow-x-auto px-0 sm:px-4">
@@ -2784,7 +3002,9 @@ function OperatingCadenceView({
                 <TableHead>Participants</TableHead>
                 <TableHead>Reminder</TableHead>
                 <TableHead>Status</TableHead>
-                {canManage && <TableHead className="text-right">Actions</TableHead>}
+                {canManage && (
+                  <TableHead className="text-right">Actions</TableHead>
+                )}
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -2792,11 +3012,17 @@ function OperatingCadenceView({
                 <TableRow key={cadence.id}>
                   <TableCell className="min-w-64">
                     <p className="font-semibold">{cadence.name}</p>
-                    <p className="mt-1 text-xs text-muted-foreground">{cadence.deliverable}</p>
+                    <p className="mt-1 text-xs text-muted-foreground">
+                      {cadence.deliverable}
+                    </p>
                   </TableCell>
-                  <TableCell className="min-w-44">{cadenceScheduleLabel(cadence)}</TableCell>
+                  <TableCell className="min-w-44">
+                    {cadenceScheduleLabel(cadence)}
+                  </TableCell>
                   <TableCell>{cadence.owner.name}</TableCell>
-                  <TableCell><Owners people={cadence.participants} /></TableCell>
+                  <TableCell>
+                    <Owners people={cadence.participants} />
+                  </TableCell>
                   <TableCell>{cadence.reminderHours}h before</TableCell>
                   <TableCell>
                     <Badge variant={cadence.active ? 'secondary' : 'outline'}>
@@ -2806,8 +3032,18 @@ function OperatingCadenceView({
                   {canManage && (
                     <TableCell className="text-right">
                       <div className="flex justify-end gap-2">
-                        <Button size="sm" variant="outline" onClick={() => onEdit(cadence)}>Edit</Button>
-                        <Button size="sm" variant="ghost" onClick={() => onToggle(cadence)}>
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          onClick={() => onEdit(cadence)}
+                        >
+                          Edit
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          onClick={() => onToggle(cadence)}
+                        >
                           {cadence.active ? 'Pause' : 'Activate'}
                         </Button>
                       </div>
@@ -2844,9 +3080,9 @@ function Reports({
     { pillar: 'AAFM India Insider', target: 20, color: '#73709a' },
   ];
   const total = Math.max(1, items.length);
-  const metrics = items.flatMap((item) =>
-    item.metrics.map((entry) => ({ item, entry })),
-  ).sort((a, b) => b.entry.recordedOn.localeCompare(a.entry.recordedOn));
+  const metrics = items
+    .flatMap((item) => item.metrics.map((entry) => ({ item, entry })))
+    .sort((a, b) => b.entry.recordedOn.localeCompare(a.entry.recordedOn));
   const views = metrics.reduce((sum, row) => sum + row.entry.views, 0);
   const reach = metrics.reduce((sum, row) => sum + row.entry.reach, 0);
   const engagements = metrics.reduce(
@@ -2970,7 +3206,7 @@ function Reports({
                   key={entry.id}
                   aria-label={`Open performance for ${item.title}`}
                   onClick={() => onOpen(item.id)}
-                    className="flex w-full items-center justify-between gap-4 rounded-xl border p-3.5 text-left hover:bg-muted"
+                  className="flex w-full items-center justify-between gap-4 rounded-xl border p-3.5 text-left hover:bg-muted"
                 >
                   <div>
                     <p className="text-sm font-semibold">{item.title}</p>
@@ -3144,11 +3380,11 @@ function Requests({
                     <div className="flex flex-wrap gap-2">
                       <Badge variant="secondary">{item.department}</Badge>
                       {item.priority === 'Urgent' && (
-                        <Badge className="bg-[#fff0e8] text-[#a23e22]">
+                        <Badge className="bg-[var(--danger-subtle)] text-[var(--danger-foreground)]">
                           Urgent
                         </Badge>
                       )}
-                      <Badge className="bg-[#eceef7] text-[#313653]">
+                      <Badge className="bg-muted text-card-foreground">
                         {item.status}
                       </Badge>
                     </div>
@@ -3179,13 +3415,13 @@ function MyActions({
   actions: ActionItem[];
   onOpen: (id: string) => void;
   onReview: (item: ContentItem, approved: boolean, note: string) => void;
-  onSaveMetric: (
-    item: ContentItem,
-    values: MetricDraft,
-  ) => void;
+  onSaveMetric: (item: ContentItem, values: MetricDraft) => void;
 }) {
   const direct = actions.filter(
-    (action) => action.kind === 'approval' || action.kind === 'work' || action.kind === 'consultation',
+    (action) =>
+      action.kind === 'approval' ||
+      action.kind === 'work' ||
+      action.kind === 'consultation',
   );
   const reviews = actions.filter((action) => action.kind === 'second-lens');
   const metrics = actions.filter((action) => action.kind === 'metrics');
@@ -3200,7 +3436,9 @@ function MyActions({
         <Card className="border-dashed bg-card">
           <CardContent className="grid place-items-center py-14 text-center">
             <CheckCircle2 className="mb-3 size-8 text-[#3b9171]" />
-            <p className="font-medium text-card-foreground">You are all caught up.</p>
+            <p className="font-medium text-card-foreground">
+              You are all caught up.
+            </p>
             <p className="mt-1 text-sm text-muted-foreground">
               New assignments and approvals will appear here.
             </p>
@@ -3210,7 +3448,9 @@ function MyActions({
       {direct.length > 0 && (
         <section className="mb-7">
           <div className="mb-3 flex items-center gap-2">
-            <h2 className="text-base font-semibold text-card-foreground">Next up</h2>
+            <h2 className="text-base font-semibold text-card-foreground">
+              Next up
+            </h2>
             <Badge variant="secondary">{direct.length}</Badge>
           </div>
           <div className="grid gap-3 xl:grid-cols-2">
@@ -3226,7 +3466,7 @@ function MyActions({
                       className={
                         kind === 'approval'
                           ? 'bg-[#1f2342] text-white'
-                          : 'bg-[#f7efdd] text-[#7a5200]'
+                          : 'bg-[var(--warning-subtle)] text-[var(--warning-foreground)]'
                       }
                     >
                       {label}
@@ -3235,7 +3475,9 @@ function MyActions({
                       <Badge variant="destructive">Overdue</Badge>
                     )}
                   </div>
-                  <p className="font-semibold text-card-foreground">{item.title}</p>
+                  <p className="font-semibold text-card-foreground">
+                    {item.title}
+                  </p>
                   <p className="mt-1 text-sm text-muted-foreground">
                     {item.stage} · {dueLabel(item)}
                   </p>
@@ -3308,7 +3550,9 @@ function ReviewCard({
           {item.contentType} · {item.workflowStep}
         </CardDescription>
         <CardAction>
-          <Badge className="bg-[#f7efdd] text-[#7a5200]">Human review</Badge>
+          <Badge className="bg-[var(--warning-subtle)] text-[var(--warning-foreground)]">
+            Human review
+          </Badge>
         </CardAction>
       </CardHeader>
       <CardContent className="space-y-3">
@@ -3350,10 +3594,7 @@ function Monitoring({
 }: {
   items: ContentItem[];
   onOpen: (id: string) => void;
-  onSave: (
-    item: ContentItem,
-    values: MetricDraft,
-  ) => void;
+  onSave: (item: ContentItem, values: MetricDraft) => void;
 }) {
   const missing = items.filter(
     (item) => item.stage === 'Post-Upload Metrics' && item.metrics.length === 0,
@@ -3370,7 +3611,7 @@ function Monitoring({
         <div className="space-y-4">
           <h2 className="text-base font-semibold text-card-foreground">
             Missing a metrics entry{' '}
-            <Badge className="ml-2 bg-[#fff0e8] text-[#b34726]">
+            <Badge className="ml-2 bg-[var(--danger-subtle)] text-[var(--danger-foreground)]">
               {missing.length}
             </Badge>
           </h2>
@@ -3420,10 +3661,7 @@ function MetricsCard({
   onOpen,
 }: {
   item: ContentItem;
-  onSave: (
-    item: ContentItem,
-    values: MetricDraft,
-  ) => void;
+  onSave: (item: ContentItem, values: MetricDraft) => void;
   onOpen: (id: string) => void;
 }) {
   const [values, setValues] = useState({
@@ -3464,7 +3702,9 @@ function MetricsCard({
             onClick={() =>
               onSave(item, {
                 platform: item.platform,
-                contentUrl: item.links.find((link) => link.kind === 'Published post')?.url,
+                contentUrl: item.links.find(
+                  (link) => link.kind === 'Published post',
+                )?.url,
                 recordedOn: new Date().toISOString().slice(0, 10),
                 reach: 0,
                 impressions: 0,
@@ -3557,7 +3797,9 @@ function Stakeholder({ items }: { items: ContentItem[] }) {
                   <p className="text-sm font-medium text-card-foreground">
                     {item.title}
                   </p>
-                  <p className="mt-1 text-xs text-muted-foreground">{item.stage}</p>
+                  <p className="mt-1 text-xs text-muted-foreground">
+                    {item.stage}
+                  </p>
                 </div>
                 <Owners people={item.accountable} />
               </div>
@@ -3573,7 +3815,10 @@ function Stakeholder({ items }: { items: ContentItem[] }) {
           </CardHeader>
           <CardContent className="space-y-3">
             {overrides.map(({ item, event }) => (
-              <Alert key={item.id} className="border-[#dfa126]/40 bg-[#f7efdd]">
+              <Alert
+                key={item.id}
+                className="border-[#dfa126]/40 bg-[var(--warning-subtle)] text-[var(--warning-foreground)]"
+              >
                 <AlertTriangle />
                 <AlertTitle>{item.title}</AlertTitle>
                 <AlertDescription>
@@ -3590,10 +3835,14 @@ function Stakeholder({ items }: { items: ContentItem[] }) {
 function People({
   people,
   demoMode,
+  canManageAccess,
+  onInvite,
   onManage,
 }: {
   people: Person[];
   demoMode: boolean;
+  canManageAccess: boolean;
+  onInvite: () => void;
   onManage: (person: Person, active: boolean, roles: AppRole[]) => void;
 }) {
   const owners = people.filter((person) => person.roles.includes('Owner'));
@@ -3602,10 +3851,15 @@ function People({
       <PageTitle
         eyebrow="PEOPLE & ACCESS"
         title="Give each person only what they need."
-        description="The two Owner accounts stay protected. Owners can activate anyone else and assign one or more working roles."
+        description="Owners and Admins can invite teammates. The two Owner accounts stay protected, and only Owners can change existing access."
+        action={
+          <Button onClick={onInvite}>
+            <Plus /> Invite teammate
+          </Button>
+        }
       />
       <div className="mb-5 grid gap-4 lg:grid-cols-[1fr_1.3fr]">
-        <Alert className="border-[#dfa126]/40 bg-[#f7efdd]">
+        <Alert className="border-[#dfa126]/40 bg-[var(--warning-subtle)] text-[var(--warning-foreground)]">
           <ShieldCheck />
           <AlertTitle>{owners.length}/2 protected Owner accounts</AlertTitle>
           <AlertDescription>
@@ -3627,7 +3881,12 @@ function People({
       </div>
       <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
         {people.map((person) => (
-          <AccessCard key={person.id} person={person} onManage={onManage} />
+          <AccessCard
+            key={person.id}
+            person={person}
+            canManage={canManageAccess}
+            onManage={onManage}
+          />
         ))}
       </div>
     </>
@@ -3636,9 +3895,11 @@ function People({
 
 function AccessCard({
   person,
+  canManage,
   onManage,
 }: {
   person: Person;
+  canManage: boolean;
   onManage: (person: Person, active: boolean, roles: AppRole[]) => void;
 }) {
   const isOwner = person.roles.includes('Owner');
@@ -3674,11 +3935,11 @@ function AccessCard({
       </CardHeader>
       <CardContent>
         {isOwner ? (
-          <p className="rounded-xl bg-[#f7efdd] p-3 text-sm text-[#6b5b35]">
+          <p className="rounded-xl bg-[var(--warning-subtle)] p-3 text-sm text-[var(--warning-foreground)]">
             Protected full-access ID. Owner access is configured securely during
             backend setup and cannot be changed here.
           </p>
-        ) : (
+        ) : canManage ? (
           <>
             <div className="mb-3 flex items-center justify-between rounded-xl border border-border p-3 text-sm font-medium">
               <span>App access</span>
@@ -3716,6 +3977,27 @@ function AccessCard({
               Save access
             </Button>
           </>
+        ) : (
+          <div className="space-y-3">
+            <div className="flex items-center justify-between rounded-xl border border-border p-3 text-sm">
+              <span>App access</span>
+              <Badge
+                variant={person.isActive === false ? 'outline' : 'secondary'}
+              >
+                {person.isActive === false ? 'Paused' : 'Active'}
+              </Badge>
+            </div>
+            <div className="flex flex-wrap gap-2">
+              {person.roles.map((role) => (
+                <Badge key={role} variant="outline">
+                  {role}
+                </Badge>
+              ))}
+            </div>
+            <p className="text-sm text-muted-foreground">
+              Owners manage existing access. Admins can invite new teammates.
+            </p>
+          </div>
         )}
       </CardContent>
     </Card>
@@ -3726,7 +4008,10 @@ function Settings({ demoMode }: { demoMode: boolean }) {
   const [savedHours, setSavedHours] = useState(24);
   const integrations = [
     { name: 'Zoho Social', use: 'Social publishing and community management' },
-    { name: 'Zoho Analytics', use: 'Automated performance import into Reports' },
+    {
+      name: 'Zoho Analytics',
+      use: 'Performance reporting outside this tracker',
+    },
     { name: 'ChatCut', use: 'Long-video clipping assistance' },
   ];
   return (
@@ -3801,7 +4086,7 @@ function Settings({ demoMode }: { demoMode: boolean }) {
                     {integration.use}
                   </p>
                 </div>
-                <Badge className="shrink-0 bg-[#f7efdd] text-[#74500a]">
+                <Badge className="shrink-0 bg-[var(--warning-subtle)] text-[var(--warning-foreground)]">
                   Ready to connect
                 </Badge>
               </div>
@@ -3812,11 +4097,12 @@ function Settings({ demoMode }: { demoMode: boolean }) {
                 <p className="text-sm font-semibold">Resend email delivery</p>
               </div>
               <p className="mt-2 text-sm text-muted-foreground">
-                Approval and due-date messages queue safely. Add the API key and
-                verified sender when available.
+                Approval, feedback and due-date messages use
+                notifications@updates.buildablelabs.com. Add the Resend API key
+                in the backend before enabling delivery.
               </p>
               {demoMode && (
-                <Badge className="mt-3 bg-[#eceef7] text-card-foreground">
+                <Badge className="mt-3 bg-muted text-card-foreground">
                   Demonstration data active
                 </Badge>
               )}
@@ -3840,6 +4126,7 @@ function ItemDetail({
   onApprove,
   onRequestChanges,
   onComment,
+  onResolveComment,
   onMetric,
 }: {
   open: boolean;
@@ -3852,13 +4139,24 @@ function ItemDetail({
   onSubmit: (item: ContentItem) => void;
   onApprove: (item: ContentItem) => void;
   onRequestChanges: (item: ContentItem, note: string) => void;
-  onComment: (item: ContentItem, body: string, parentId?: string) => void;
-  onMetric: (
+  onComment: (
     item: ContentItem,
-    values: MetricDraft,
+    body: string,
+    kind: Comment['kind'],
+    stage: Stage,
+    parentId?: string,
   ) => void;
+  onResolveComment: (
+    item: ContentItem,
+    commentId: string,
+    resolved: boolean,
+  ) => void;
+  onMetric: (item: ContentItem, values: MetricDraft) => void;
 }) {
   const [comment, setComment] = useState('');
+  const [commentKind, setCommentKind] = useState<Comment['kind']>('Update');
+  const [commentStage, setCommentStage] = useState<Stage | 'All'>('All');
+  const [replyingTo, setReplyingTo] = useState<string>();
   const [changeNote, setChangeNote] = useState('');
   if (!item) return null;
   const readOnly = roles.length === 1 && roles[0] === 'Read-only Stakeholder';
@@ -3893,7 +4191,12 @@ function ItemDetail({
             <TabsList className="mt-2">
               <TabsTrigger value="work">Work</TabsTrigger>
               <TabsTrigger value="comments">
-                Comments ({item.comments.length})
+                Discussion ({item.comments.length})
+                {item.comments.some(
+                  (entry) => entry.kind === 'Feedback' && !entry.resolved,
+                ) && (
+                  <span className="ml-1 size-1.5 rounded-full bg-destructive" />
+                )}
               </TabsTrigger>
               <TabsTrigger value="history">History</TabsTrigger>
               <TabsTrigger value="metrics">Metrics</TabsTrigger>
@@ -3926,7 +4229,7 @@ function ItemDetail({
                         key={step}
                         disabled={readOnly || !canSubmit}
                         onClick={() => onStepChange(item, step)}
-                        className={`flex items-center gap-3 rounded-xl border p-3 text-left transition ${active ? 'border-[#dfa126] bg-[#fff8e8]' : complete ? 'border-border bg-muted' : 'border-border bg-card'} disabled:cursor-default`}
+                        className={`flex items-center gap-3 rounded-xl border p-3 text-left transition ${active ? 'border-[#dfa126] bg-[var(--warning-subtle)]' : complete ? 'border-border bg-muted' : 'border-border bg-card'} disabled:cursor-default`}
                       >
                         <span
                           className={`grid size-6 shrink-0 place-items-center rounded-full text-xs font-bold ${active ? 'bg-[#dfa126] text-card-foreground' : complete ? 'bg-[#3b9171] text-white' : 'bg-muted text-muted-foreground'}`}
@@ -3955,7 +4258,7 @@ function ItemDetail({
                 <InfoBlock label="Informed" people={item.informed} />
               </div>
               {['Script', 'Production'].includes(item.stage) && (
-                <Alert className="border-[#dfa126]/40 bg-[#f7efdd]">
+                <Alert className="border-[#dfa126]/40 bg-[var(--warning-subtle)] text-[var(--warning-foreground)]">
                   <ShieldCheck />
                   <AlertTitle>
                     Independent human review: {item.secondLens}
@@ -3997,35 +4300,128 @@ function ItemDetail({
             </TabsContent>
 
             <TabsContent value="comments" className="py-5">
+              <div className="mb-4 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-border bg-muted/50 p-3">
+                <div>
+                  <p className="text-sm font-semibold">Stage discussion</p>
+                  <p className="mt-0.5 text-xs text-muted-foreground">
+                    Updates, feedback and decisions stay attached to the stage
+                    where they were recorded.
+                  </p>
+                </div>
+                <NativeSelect
+                  aria-label="Filter discussion by stage"
+                  value={commentStage}
+                  onChange={(event) =>
+                    setCommentStage(event.target.value as Stage | 'All')
+                  }
+                  className="w-48 bg-card"
+                >
+                  <NativeSelectOption value="All">
+                    All stages
+                  </NativeSelectOption>
+                  {PIPELINE.map((stage) => (
+                    <NativeSelectOption key={stage}>{stage}</NativeSelectOption>
+                  ))}
+                </NativeSelect>
+              </div>
               <div className="space-y-4">
-                {item.comments.map((entry) => (
-                  <div
-                    key={entry.id}
-                    className={
-                      entry.parentId
-                        ? 'ml-8 border-l-2 border-[#dfa126]/30 pl-4'
-                        : ''
-                    }
-                  >
-                    <div className="flex gap-3">
-                      <div className="grid size-8 shrink-0 place-items-center rounded-full bg-[#eceef7] text-[10px] font-bold">
-                        {entry.initials}
-                      </div>
-                      <div className="min-w-0 flex-1">
-                        <div className="flex justify-between gap-3">
-                          <p className="text-sm font-medium">{entry.author}</p>
-                          <p className="text-xs text-muted-foreground">{entry.at}</p>
+                {item.comments
+                  .filter(
+                    (entry) =>
+                      commentStage === 'All' || entry.stage === commentStage,
+                  )
+                  .map((entry) => (
+                    <div
+                      key={entry.id}
+                      className={
+                        entry.parentId
+                          ? 'ml-8 border-l-2 border-[#dfa126]/30 pl-4'
+                          : ''
+                      }
+                    >
+                      <div className="flex gap-3">
+                        <div className="grid size-8 shrink-0 place-items-center rounded-full bg-muted text-[11px] font-bold text-card-foreground">
+                          {entry.initials}
                         </div>
-                        <p className="mt-1 text-sm leading-relaxed text-muted-foreground">
-                          {entry.body}
-                        </p>
+                        <div className="min-w-0 flex-1">
+                          <div className="flex justify-between gap-3">
+                            <p className="text-sm font-medium">
+                              {entry.author}
+                            </p>
+                            <p className="text-xs text-muted-foreground">
+                              {entry.at}
+                            </p>
+                          </div>
+                          <div className="mt-1 flex flex-wrap items-center gap-1.5">
+                            <Badge variant="outline">{entry.stage}</Badge>
+                            <Badge
+                              className={
+                                entry.kind === 'Feedback'
+                                  ? 'bg-[var(--warning-subtle)] text-[var(--warning-foreground)]'
+                                  : entry.kind === 'Decision'
+                                    ? 'bg-[var(--info-subtle)] text-[var(--info-foreground)]'
+                                    : 'bg-muted text-muted-foreground'
+                              }
+                            >
+                              {entry.kind}
+                            </Badge>
+                            {entry.kind === 'Feedback' && (
+                              <Badge
+                                variant={
+                                  entry.resolved ? 'secondary' : 'destructive'
+                                }
+                              >
+                                {entry.resolved ? 'Resolved' : 'Open feedback'}
+                              </Badge>
+                            )}
+                          </div>
+                          <p className="mt-2 text-sm leading-relaxed text-card-foreground">
+                            {entry.body}
+                          </p>
+                          <div className="mt-2 flex flex-wrap gap-2">
+                            {!readOnly && (
+                              <Button
+                                type="button"
+                                size="sm"
+                                variant="ghost"
+                                onClick={() => setReplyingTo(entry.id)}
+                              >
+                                Reply
+                              </Button>
+                            )}
+                            {!readOnly && entry.kind === 'Feedback' && (
+                              <Button
+                                type="button"
+                                size="sm"
+                                variant="ghost"
+                                onClick={() =>
+                                  onResolveComment(
+                                    item,
+                                    entry.id,
+                                    !entry.resolved,
+                                  )
+                                }
+                              >
+                                {entry.resolved ? 'Reopen' : 'Mark resolved'}
+                              </Button>
+                            )}
+                          </div>
+                          {entry.resolved && entry.resolvedBy && (
+                            <p className="mt-1 text-xs text-muted-foreground">
+                              Resolved by {entry.resolvedBy} ·{' '}
+                              {entry.resolvedAt}
+                            </p>
+                          )}
+                        </div>
                       </div>
                     </div>
-                  </div>
-                ))}
-                {!item.comments.length && (
+                  ))}
+                {!item.comments.filter(
+                  (entry) =>
+                    commentStage === 'All' || entry.stage === commentStage,
+                ).length && (
                   <p className="py-6 text-center text-sm text-muted-foreground">
-                    No comments yet.
+                    No discussion recorded for this stage yet.
                   </p>
                 )}
               </div>
@@ -4034,14 +4430,56 @@ function ItemDetail({
                   className="mt-5"
                   onSubmit={(event) => {
                     event.preventDefault();
-                    onComment(item, comment);
+                    onComment(
+                      item,
+                      comment,
+                      commentKind,
+                      replyingTo
+                        ? (item.comments.find(
+                            (entry) => entry.id === replyingTo,
+                          )?.stage ?? item.stage)
+                        : item.stage,
+                      replyingTo,
+                    );
                     setComment('');
+                    setReplyingTo(undefined);
                   }}
                 >
+                  <div className="mb-2 flex flex-wrap items-center gap-2">
+                    <NativeSelect
+                      aria-label="Discussion type"
+                      value={commentKind}
+                      onChange={(event) =>
+                        setCommentKind(event.target.value as Comment['kind'])
+                      }
+                      className="w-40 bg-card"
+                    >
+                      <NativeSelectOption>Update</NativeSelectOption>
+                      <NativeSelectOption>Feedback</NativeSelectOption>
+                      <NativeSelectOption>Decision</NativeSelectOption>
+                    </NativeSelect>
+                    <Badge variant="outline">{item.stage}</Badge>
+                    {replyingTo && (
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="ghost"
+                        onClick={() => setReplyingTo(undefined)}
+                      >
+                        Replying · cancel
+                      </Button>
+                    )}
+                  </div>
                   <Textarea
                     value={comment}
                     onChange={(event) => setComment(event.target.value)}
-                    placeholder="Leave a note or use @name to mention someone"
+                    placeholder={
+                      commentKind === 'Feedback'
+                        ? 'Describe the change needed and the expected outcome'
+                        : commentKind === 'Decision'
+                          ? 'Record the decision and why it was made'
+                          : 'Share a progress update or context for the team'
+                    }
                   />
                   <Button className="mt-2" type="submit">
                     Add comment
@@ -4056,7 +4494,7 @@ function ItemDetail({
                   <div key={event.at + index} className="relative pl-7">
                     <span
                       className={
-                        'absolute left-0 top-1 size-[15px] rounded-full border-4 border-white ' +
+                        'absolute left-0 top-1 size-[15px] rounded-full border-4 border-card ' +
                         (event.flagged ? 'bg-[#b34726]' : 'bg-[#dfa126]')
                       }
                     />
@@ -4071,7 +4509,7 @@ function ItemDetail({
                         className={
                           'mt-2 rounded-lg p-3 text-sm ' +
                           (event.flagged
-                            ? 'bg-[#fff0e8] text-[#8a341b]'
+                            ? 'bg-[var(--danger-subtle)] text-[var(--danger-foreground)]'
                             : 'bg-background text-muted-foreground')
                         }
                       >
@@ -4096,7 +4534,10 @@ function ItemDetail({
                     <div className="grid grid-cols-3 gap-2 sm:grid-cols-6">
                       <MiniStat label="Views" value={metric.views} />
                       <MiniStat label="Reach" value={metric.reach} />
-                      <MiniStat label="Impressions" value={metric.impressions} />
+                      <MiniStat
+                        label="Impressions"
+                        value={metric.impressions}
+                      />
                       <MiniStat label="Likes" value={metric.likes} />
                       <MiniStat label="Shares" value={metric.shares} />
                       <MiniStat label="Saves" value={metric.saves} />
@@ -4176,7 +4617,9 @@ function InfoBlock({ label, people }: { label: string; people: Person[] }) {
             <span className="text-sm font-medium">{person.name}</span>
           </div>
         ))}
-        {!people.length && <p className="text-sm text-muted-foreground">Unassigned</p>}
+        {!people.length && (
+          <p className="text-sm text-muted-foreground">Unassigned</p>
+        )}
       </div>
     </div>
   );
@@ -4285,7 +4728,9 @@ function MetricsDialog({
                 >
                   {['Instagram', 'YouTube', 'LinkedIn', 'Facebook'].map(
                     (value) => (
-                      <NativeSelectOption key={value}>{value}</NativeSelectOption>
+                      <NativeSelectOption key={value}>
+                        {value}
+                      </NativeSelectOption>
                     ),
                   )}
                 </NativeSelect>
@@ -4320,7 +4765,10 @@ function MetricsDialog({
                     min={key === 'followerChange' ? undefined : 0}
                     value={values[key]}
                     onChange={(event) =>
-                      setValues({ ...values, [key]: Number(event.target.value) })
+                      setValues({
+                        ...values,
+                        [key]: Number(event.target.value),
+                      })
                     }
                   />
                 </div>
@@ -4377,7 +4825,9 @@ function RaciDialog({
             assignment={raciFor(intent.item, intent.stage)}
             people={people.filter((person) => person.isActive !== false)}
             onCancel={() => onOpenChange(false)}
-            onSave={(assignment) => onSave(intent.item, intent.stage, assignment)}
+            onSave={(assignment) =>
+              onSave(intent.item, intent.stage, assignment)
+            }
           />
         )}
       </DialogContent>
@@ -4398,35 +4848,66 @@ function RaciEditor({
 }) {
   const [values, setValues] = useState(assignment);
   const roles: Array<[keyof RaciAssignment, string, string]> = [
-    ['responsible', 'R · Responsible', 'Does the work and submits the handoff.'],
-    ['accountable', 'A · Accountable', 'Owns the decision and approves the handoff.'],
-    ['consulted', 'C · Consulted', 'Gives subject-matter input before the decision.'],
-    ['informed', 'I · Informed', 'Receives updates without approval authority.'],
+    [
+      'responsible',
+      'R · Responsible',
+      'Does the work and submits the handoff.',
+    ],
+    [
+      'accountable',
+      'A · Accountable',
+      'Owns the decision and approves the handoff.',
+    ],
+    [
+      'consulted',
+      'C · Consulted',
+      'Gives subject-matter input before the decision.',
+    ],
+    [
+      'informed',
+      'I · Informed',
+      'Receives updates without approval authority.',
+    ],
   ];
   return (
     <form
       className="space-y-5"
       onSubmit={(event) => {
         event.preventDefault();
-        if (values.responsible.length && values.accountable.length) onSave(values);
+        if (values.responsible.length && values.accountable.length)
+          onSave(values);
       }}
     >
       <div className="grid gap-4 sm:grid-cols-2">
         {roles.map(([role, label, description]) => (
           <div key={role} className="rounded-xl border border-border p-4">
             <p className="text-sm font-semibold">{label}</p>
-            <p className="mb-3 mt-1 text-sm text-muted-foreground">{description}</p>
+            <p className="mb-3 mt-1 text-sm text-muted-foreground">
+              {description}
+            </p>
             <div className="space-y-2">
               {people.map((person) => (
-                <label key={person.id} className="flex cursor-pointer items-center gap-2 text-sm">
+                <label
+                  key={person.id}
+                  className="flex cursor-pointer items-center gap-2 text-sm"
+                >
                   <Checkbox
-                    checked={values[role].some((entry) => entry.id === person.id)}
+                    checked={values[role].some(
+                      (entry) => entry.id === person.id,
+                    )}
                     onCheckedChange={(checked) =>
                       setValues((current) => ({
                         ...current,
                         [role]: checked
-                          ? [...current[role].filter((entry) => entry.id !== person.id), person]
-                          : current[role].filter((entry) => entry.id !== person.id),
+                          ? [
+                              ...current[role].filter(
+                                (entry) => entry.id !== person.id,
+                              ),
+                              person,
+                            ]
+                          : current[role].filter(
+                              (entry) => entry.id !== person.id,
+                            ),
                       }))
                     }
                   />
@@ -4438,11 +4919,19 @@ function RaciEditor({
         ))}
       </div>
       <p className="text-sm text-muted-foreground">
-        Every stage needs at least one Responsible and Accountable person. Leaving Consulted or Informed blank is shown as a gap in the comparison.
+        Every stage needs at least one Responsible and Accountable person.
+        Leaving Consulted or Informed blank is shown as a gap in the comparison.
       </p>
       <DialogFooter>
-        <Button type="button" variant="outline" onClick={onCancel}>Cancel</Button>
-        <Button type="submit" disabled={!values.responsible.length || !values.accountable.length}>Save RACI</Button>
+        <Button type="button" variant="outline" onClick={onCancel}>
+          Cancel
+        </Button>
+        <Button
+          type="submit"
+          disabled={!values.responsible.length || !values.accountable.length}
+        >
+          Save RACI
+        </Button>
       </DialogFooter>
     </form>
   );
@@ -4463,8 +4952,15 @@ function CadenceDialog({
     <Dialog open={Boolean(cadence)} onOpenChange={onOpenChange}>
       <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-2xl">
         <DialogHeader>
-          <DialogTitle>{cadence === 'new' ? 'Add recurring cadence' : 'Edit recurring cadence'}</DialogTitle>
-          <DialogDescription>Set the team rhythm, expected output and people involved. All times use Asia/Kolkata.</DialogDescription>
+          <DialogTitle>
+            {cadence === 'new'
+              ? 'Add recurring cadence'
+              : 'Edit recurring cadence'}
+          </DialogTitle>
+          <DialogDescription>
+            Set the team rhythm, expected output and people involved. All times
+            use Asia/Kolkata.
+          </DialogDescription>
         </DialogHeader>
         {cadence && (
           <CadenceEditor
@@ -4506,89 +5002,343 @@ function CadenceEditor({
     reminderHours: cadence?.reminderHours ?? 24,
     active: cadence?.active ?? true,
   });
-  const weekdays = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+  const weekdays = [
+    'Sunday',
+    'Monday',
+    'Tuesday',
+    'Wednesday',
+    'Thursday',
+    'Friday',
+    'Saturday',
+  ];
   return (
     <form
       className="space-y-4"
       onSubmit={(event) => {
         event.preventDefault();
-        onSave({ ...draft, name: draft.name.trim(), purpose: draft.purpose.trim(), deliverable: draft.deliverable.trim() });
+        onSave({
+          ...draft,
+          name: draft.name.trim(),
+          purpose: draft.purpose.trim(),
+          deliverable: draft.deliverable.trim(),
+        });
       }}
     >
       <div>
         <Label className="mb-1.5">Cadence name</Label>
-        <Input required minLength={3} value={draft.name} onChange={(event) => setDraft({ ...draft, name: event.target.value })} placeholder="e.g. Weekly content planning" />
+        <Input
+          required
+          minLength={3}
+          value={draft.name}
+          onChange={(event) => setDraft({ ...draft, name: event.target.value })}
+          placeholder="e.g. Weekly content planning"
+        />
       </div>
       <div>
         <Label className="mb-1.5">Purpose</Label>
-        <Textarea required minLength={3} value={draft.purpose} onChange={(event) => setDraft({ ...draft, purpose: event.target.value })} placeholder="What decision or review should happen?" />
+        <Textarea
+          required
+          minLength={3}
+          value={draft.purpose}
+          onChange={(event) =>
+            setDraft({ ...draft, purpose: event.target.value })
+          }
+          placeholder="What decision or review should happen?"
+        />
       </div>
       <div className="grid gap-3 sm:grid-cols-3">
         <div>
           <Label className="mb-1.5">Repeat</Label>
-          <NativeSelect className="w-full" value={draft.frequency} onChange={(event) => setDraft({ ...draft, frequency: event.target.value as CadenceFrequency })}>
-            <NativeSelectOption>Weekly</NativeSelectOption><NativeSelectOption>Monthly</NativeSelectOption>
+          <NativeSelect
+            className="w-full"
+            value={draft.frequency}
+            onChange={(event) =>
+              setDraft({
+                ...draft,
+                frequency: event.target.value as CadenceFrequency,
+              })
+            }
+          >
+            <NativeSelectOption>Weekly</NativeSelectOption>
+            <NativeSelectOption>Monthly</NativeSelectOption>
           </NativeSelect>
         </div>
         <div>
-          <Label className="mb-1.5">{draft.frequency === 'Weekly' ? 'Day of week' : 'Day of month'}</Label>
+          <Label className="mb-1.5">
+            {draft.frequency === 'Weekly' ? 'Day of week' : 'Day of month'}
+          </Label>
           {draft.frequency === 'Weekly' ? (
-            <NativeSelect className="w-full" value={draft.weekday} onChange={(event) => setDraft({ ...draft, weekday: Number(event.target.value) })}>
-              {weekdays.map((day, index) => <NativeSelectOption key={day} value={index}>{day}</NativeSelectOption>)}
+            <NativeSelect
+              className="w-full"
+              value={draft.weekday}
+              onChange={(event) =>
+                setDraft({ ...draft, weekday: Number(event.target.value) })
+              }
+            >
+              {weekdays.map((day, index) => (
+                <NativeSelectOption key={day} value={index}>
+                  {day}
+                </NativeSelectOption>
+              ))}
             </NativeSelect>
           ) : (
-            <Input type="number" min={1} max={28} required value={draft.dayOfMonth} onChange={(event) => setDraft({ ...draft, dayOfMonth: Number(event.target.value) })} />
+            <Input
+              type="number"
+              min={1}
+              max={28}
+              required
+              value={draft.dayOfMonth}
+              onChange={(event) =>
+                setDraft({ ...draft, dayOfMonth: Number(event.target.value) })
+              }
+            />
           )}
         </div>
         <div>
           <Label className="mb-1.5">Time · IST</Label>
-          <Input type="time" required value={draft.time} onChange={(event) => setDraft({ ...draft, time: event.target.value })} />
+          <Input
+            type="time"
+            required
+            value={draft.time}
+            onChange={(event) =>
+              setDraft({ ...draft, time: event.target.value })
+            }
+          />
         </div>
       </div>
-      {draft.frequency === 'Monthly' && <p className="text-sm text-muted-foreground">Choose days 1–28 so every month has the same recurring date.</p>}
+      {draft.frequency === 'Monthly' && (
+        <p className="text-sm text-muted-foreground">
+          Choose days 1–28 so every month has the same recurring date.
+        </p>
+      )}
       <div className="grid gap-3 sm:grid-cols-3">
         <div>
           <Label className="mb-1.5">Owner</Label>
-          <NativeSelect className="w-full" value={draft.ownerId} onChange={(event) => setDraft({ ...draft, ownerId: event.target.value })}>
-            {people.map((person) => <NativeSelectOption key={person.id} value={person.id}>{person.name}</NativeSelectOption>)}
+          <NativeSelect
+            className="w-full"
+            value={draft.ownerId}
+            onChange={(event) =>
+              setDraft({ ...draft, ownerId: event.target.value })
+            }
+          >
+            {people.map((person) => (
+              <NativeSelectOption key={person.id} value={person.id}>
+                {person.name}
+              </NativeSelectOption>
+            ))}
           </NativeSelect>
         </div>
         <div>
           <Label className="mb-1.5">Linked stage</Label>
-          <NativeSelect className="w-full" value={draft.stage ?? ''} onChange={(event) => setDraft({ ...draft, stage: event.target.value ? event.target.value as Stage : undefined })}>
+          <NativeSelect
+            className="w-full"
+            value={draft.stage ?? ''}
+            onChange={(event) =>
+              setDraft({
+                ...draft,
+                stage: event.target.value
+                  ? (event.target.value as Stage)
+                  : undefined,
+              })
+            }
+          >
             <NativeSelectOption value="">Cross-stage</NativeSelectOption>
-            {PIPELINE.map((stage) => <NativeSelectOption key={stage}>{stage}</NativeSelectOption>)}
+            {PIPELINE.map((stage) => (
+              <NativeSelectOption key={stage}>{stage}</NativeSelectOption>
+            ))}
           </NativeSelect>
         </div>
         <div>
           <Label className="mb-1.5">Reminder · hours before</Label>
-          <Input type="number" min={0} max={720} required value={draft.reminderHours} onChange={(event) => setDraft({ ...draft, reminderHours: Number(event.target.value) })} />
+          <Input
+            type="number"
+            min={0}
+            max={720}
+            required
+            value={draft.reminderHours}
+            onChange={(event) =>
+              setDraft({ ...draft, reminderHours: Number(event.target.value) })
+            }
+          />
         </div>
       </div>
       <div>
         <Label className="mb-1.5">Expected deliverable</Label>
-        <Textarea required minLength={3} value={draft.deliverable} onChange={(event) => setDraft({ ...draft, deliverable: event.target.value })} placeholder="What should be ready when this checkpoint is complete?" />
+        <Textarea
+          required
+          minLength={3}
+          value={draft.deliverable}
+          onChange={(event) =>
+            setDraft({ ...draft, deliverable: event.target.value })
+          }
+          placeholder="What should be ready when this checkpoint is complete?"
+        />
       </div>
       <div>
         <Label className="mb-2">Participants</Label>
         <div className="grid gap-2 sm:grid-cols-2">
           {people.map((person) => (
-            <label key={person.id} className="flex cursor-pointer items-center gap-2 rounded-lg border p-2.5 text-sm">
-              <Checkbox checked={draft.participantIds.includes(person.id)} onCheckedChange={(checked) => setDraft({ ...draft, participantIds: checked ? [...draft.participantIds.filter((id) => id !== person.id), person.id] : draft.participantIds.filter((id) => id !== person.id) })} />
+            <label
+              key={person.id}
+              className="flex cursor-pointer items-center gap-2 rounded-lg border p-2.5 text-sm"
+            >
+              <Checkbox
+                checked={draft.participantIds.includes(person.id)}
+                onCheckedChange={(checked) =>
+                  setDraft({
+                    ...draft,
+                    participantIds: checked
+                      ? [
+                          ...draft.participantIds.filter(
+                            (id) => id !== person.id,
+                          ),
+                          person.id,
+                        ]
+                      : draft.participantIds.filter((id) => id !== person.id),
+                  })
+                }
+              />
               {person.name}
             </label>
           ))}
         </div>
       </div>
       <label className="flex cursor-pointer items-center gap-2 text-sm">
-        <Checkbox checked={draft.active} onCheckedChange={(checked) => setDraft({ ...draft, active: Boolean(checked) })} />
+        <Checkbox
+          checked={draft.active}
+          onCheckedChange={(checked) =>
+            setDraft({ ...draft, active: Boolean(checked) })
+          }
+        />
         Active recurrence
       </label>
       <DialogFooter>
-        <Button type="button" variant="outline" onClick={onCancel}>Cancel</Button>
-        <Button type="submit" disabled={!draft.name.trim() || !draft.ownerId || !draft.deliverable.trim() || !draft.purpose.trim()}>Save cadence</Button>
+        <Button type="button" variant="outline" onClick={onCancel}>
+          Cancel
+        </Button>
+        <Button
+          type="submit"
+          disabled={
+            !draft.name.trim() ||
+            !draft.ownerId ||
+            !draft.deliverable.trim() ||
+            !draft.purpose.trim()
+          }
+        >
+          Save cadence
+        </Button>
       </DialogFooter>
     </form>
+  );
+}
+
+function InviteUserDialog({
+  open,
+  onOpenChange,
+  onInvite,
+}: {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  onInvite: (draft: InviteDraft) => void;
+}) {
+  const [fullName, setFullName] = useState('');
+  const [email, setEmail] = useState('');
+  const [roles, setRoles] = useState<Exclude<AppRole, 'Owner'>[]>([
+    'Content Producer',
+  ]);
+  const assignable: Exclude<AppRole, 'Owner'>[] = [
+    'Admin',
+    'Content Producer',
+    'Content Approver',
+    'Monitoring',
+    'Read-only Stakeholder',
+  ];
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="sm:max-w-lg">
+        <DialogHeader>
+          <DialogTitle>Invite a teammate</DialogTitle>
+          <DialogDescription>
+            They receive a secure email invitation and must sign in before
+            accessing the tracker.
+          </DialogDescription>
+        </DialogHeader>
+        <form
+          className="space-y-4"
+          onSubmit={(event) => {
+            event.preventDefault();
+            if (!roles.length) return;
+            onInvite({
+              email: email.trim().toLowerCase(),
+              fullName: fullName.trim(),
+              roles,
+            });
+          }}
+        >
+          <div>
+            <Label className="mb-1.5">Name</Label>
+            <Input
+              required
+              value={fullName}
+              onChange={(event) => setFullName(event.target.value)}
+              placeholder="Full name"
+            />
+          </div>
+          <div>
+            <Label className="mb-1.5">Work email</Label>
+            <Input
+              required
+              type="email"
+              value={email}
+              onChange={(event) => setEmail(event.target.value)}
+              placeholder="name@aafmindia.com"
+            />
+          </div>
+          <div>
+            <Label className="mb-2">Starting access</Label>
+            <div className="grid gap-2 sm:grid-cols-2">
+              {assignable.map((role) => (
+                <label
+                  key={role}
+                  className="flex cursor-pointer items-center gap-2 rounded-lg border border-border p-2.5 text-sm"
+                >
+                  <Checkbox
+                    checked={roles.includes(role)}
+                    onCheckedChange={(checked) =>
+                      setRoles(
+                        checked
+                          ? [...roles, role]
+                          : roles.filter((entry) => entry !== role),
+                      )
+                    }
+                  />
+                  {role}
+                </label>
+              ))}
+            </div>
+          </div>
+          <p className="text-sm text-muted-foreground">
+            Invitations will be sent from the verified updates.buildablelabs.com
+            email domain after Resend is connected.
+          </p>
+          <DialogFooter>
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => onOpenChange(false)}
+            >
+              Cancel
+            </Button>
+            <Button
+              type="submit"
+              disabled={!fullName.trim() || !email.trim() || !roles.length}
+            >
+              <Send /> Send invitation
+            </Button>
+          </DialogFooter>
+        </form>
+      </DialogContent>
+    </Dialog>
   );
 }
 
@@ -4771,19 +5521,48 @@ function CreateDialog({
           </div>
           <div className="grid gap-4 sm:grid-cols-2">
             {[
-              { label: 'Consulted', description: 'People who give input before approval', ids: consultedIds, setIds: setConsultedIds },
-              { label: 'Informed', description: 'People who receive progress updates', ids: informedIds, setIds: setInformedIds },
+              {
+                label: 'Consulted',
+                description: 'People who give input before approval',
+                ids: consultedIds,
+                setIds: setConsultedIds,
+              },
+              {
+                label: 'Informed',
+                description: 'People who receive progress updates',
+                ids: informedIds,
+                setIds: setInformedIds,
+              },
             ].map(({ label, description, ids, setIds }) => (
               <div key={label}>
                 <Label>{label}</Label>
-                <p className="mb-2 mt-1 text-sm text-muted-foreground">{description}</p>
+                <p className="mb-2 mt-1 text-sm text-muted-foreground">
+                  {description}
+                </p>
                 <div className="space-y-2">
-                  {people.filter((person) => person.isActive !== false).map((person) => (
-                    <label key={person.id} className="flex cursor-pointer items-center gap-2 text-sm">
-                      <Checkbox checked={ids.includes(person.id)} onCheckedChange={(checked) => setIds(checked ? [...ids.filter((id) => id !== person.id), person.id] : ids.filter((id) => id !== person.id))} />
-                      {person.name}
-                    </label>
-                  ))}
+                  {people
+                    .filter((person) => person.isActive !== false)
+                    .map((person) => (
+                      <label
+                        key={person.id}
+                        className="flex cursor-pointer items-center gap-2 text-sm"
+                      >
+                        <Checkbox
+                          checked={ids.includes(person.id)}
+                          onCheckedChange={(checked) =>
+                            setIds(
+                              checked
+                                ? [
+                                    ...ids.filter((id) => id !== person.id),
+                                    person.id,
+                                  ]
+                                : ids.filter((id) => id !== person.id),
+                            )
+                          }
+                        />
+                        {person.name}
+                      </label>
+                    ))}
                 </div>
               </div>
             ))}
@@ -4799,8 +5578,8 @@ function CreateDialog({
                 Plan the full RACI ahead
               </strong>
               <span className="text-muted-foreground">
-                Copy all four assignments across all six stages. Admin can revise each
-                stage later.
+                Copy all four assignments across all six stages. Admin can
+                revise each stage later.
               </span>
             </span>
           </div>
@@ -4894,7 +5673,9 @@ function MoveDialog({
         </DialogHeader>
         {intent && (
           <div className="rounded-xl bg-background p-4">
-            <p className="font-medium text-card-foreground">{intent.item.title}</p>
+            <p className="font-medium text-card-foreground">
+              {intent.item.title}
+            </p>
             <p className="mt-1 text-sm text-muted-foreground">
               {intent.item.stage} <ArrowRight className="mx-1 inline size-4" />{' '}
               {intent.toStage}
@@ -4972,7 +5753,11 @@ function LoginScreen({
                   required
                 />
               </div>
-              {notice && <p className="text-sm text-[#b34726]">{notice}</p>}
+              {notice && (
+                <p className="text-sm text-[var(--danger-foreground)]">
+                  {notice}
+                </p>
+              )}
               <Button className="w-full" disabled={busy}>
                 {busy ? 'Signing in…' : 'Sign in'}
               </Button>
@@ -4991,7 +5776,9 @@ function LoadingScreen() {
     <div className="grid min-h-svh place-items-center bg-background">
       <div className="text-center">
         <div className="mx-auto mb-4 size-9 animate-spin rounded-full border-2 border-[#dfa126] border-t-transparent" />
-        <p className="text-sm text-muted-foreground">Opening content operations…</p>
+        <p className="text-sm text-muted-foreground">
+          Opening content operations…
+        </p>
       </div>
     </div>
   );

@@ -1,5 +1,6 @@
 import type {
   CadenceRun,
+  Comment,
   ContentItem,
   DepartmentRequest,
   OperatingCadence,
@@ -118,8 +119,8 @@ const [
 
 type ContentItemBeforeRaci = Omit<
   ContentItem,
-  'consulted' | 'informed' | 'raci'
->;
+  'consulted' | 'informed' | 'raci' | 'comments'
+> & { comments: Array<Omit<Comment, 'stage' | 'kind' | 'resolved'>> };
 
 const demoItemsBeforeRaci: ContentItemBeforeRaci[] = [
   {
@@ -534,6 +535,12 @@ export const demoItems: ContentItem[] = demoItemsBeforeRaci.map((item) => {
   ) as Record<Stage, RaciAssignment>;
   return {
     ...item,
+    comments: item.comments.map((comment) => ({
+      ...comment,
+      stage: item.stage,
+      kind: 'Update' as const,
+      resolved: false,
+    })),
     consulted: raci[item.stage].consulted,
     informed: raci[item.stage].informed,
     raci,
@@ -544,7 +551,8 @@ export const demoCadences: OperatingCadence[] = [
   {
     id: 'cad-6',
     name: 'Script and compliance review',
-    purpose: 'Review technical accuracy, disclaimers and subject-matter inputs before recording.',
+    purpose:
+      'Review technical accuracy, disclaimers and subject-matter inputs before recording.',
     frequency: 'Weekly',
     weekday: 2,
     time: '11:30',
@@ -552,7 +560,8 @@ export const demoCadences: OperatingCadence[] = [
     owner: compliance,
     participants: [priya, harshit, hods],
     stage: 'Script',
-    deliverable: 'Compliance decisions and script revisions logged on each content item',
+    deliverable:
+      'Compliance decisions and script revisions logged on each content item',
     reminderHours: 24,
     active: true,
   },
@@ -574,7 +583,8 @@ export const demoCadences: OperatingCadence[] = [
   {
     id: 'cad-8',
     name: 'Publishing readiness check',
-    purpose: 'Check approved assets, platform schedules and published-link tracking.',
+    purpose:
+      'Check approved assets, platform schedules and published-link tracking.',
     frequency: 'Weekly',
     weekday: 5,
     time: '10:00',
@@ -582,14 +592,16 @@ export const demoCadences: OperatingCadence[] = [
     owner: chhahal,
     participants: [priya, harshit],
     stage: 'Upload',
-    deliverable: 'Approved publishing slots with final files and tracked live links',
+    deliverable:
+      'Approved publishing slots with final files and tracked live links',
     reminderHours: 24,
     active: true,
   },
   {
     id: 'cad-1',
     name: 'Weekly content planning',
-    purpose: 'Confirm priorities, owners, dependencies and deadlines for the next seven days.',
+    purpose:
+      'Confirm priorities, owners, dependencies and deadlines for the next seven days.',
     frequency: 'Weekly',
     weekday: 1,
     time: '10:30',
@@ -604,7 +616,8 @@ export const demoCadences: OperatingCadence[] = [
   {
     id: 'cad-2',
     name: 'Approval and publishing readiness',
-    purpose: 'Clear compliance, creative and publishing blockers before the weekly release window.',
+    purpose:
+      'Clear compliance, creative and publishing blockers before the weekly release window.',
     frequency: 'Weekly',
     weekday: 4,
     time: '15:30',
@@ -612,14 +625,16 @@ export const demoCadences: OperatingCadence[] = [
     owner: harshit,
     participants: [priya, compliance, chhahal],
     stage: 'Production',
-    deliverable: 'Decision log for every item due to publish in the next seven days',
+    deliverable:
+      'Decision log for every item due to publish in the next seven days',
     reminderHours: 6,
     active: true,
   },
   {
     id: 'cad-3',
     name: 'Weekly performance pulse',
-    purpose: 'Capture platform results, lessons and follow-up actions in the unified report.',
+    purpose:
+      'Capture platform results, lessons and follow-up actions in the unified report.',
     frequency: 'Weekly',
     weekday: 5,
     time: '16:30',
@@ -649,7 +664,8 @@ export const demoCadences: OperatingCadence[] = [
   {
     id: 'cad-5',
     name: 'Monthly content and analytics review',
-    purpose: 'Review content mix, platform performance and next-month experiments.',
+    purpose:
+      'Review content mix, platform performance and next-month experiments.',
     frequency: 'Monthly',
     dayOfMonth: 2,
     time: '15:00',
@@ -657,7 +673,8 @@ export const demoCadences: OperatingCadence[] = [
     owner: chhahal,
     participants: [priya, harshit, ownerOne, ownerTwo],
     stage: 'Post-Upload Metrics',
-    deliverable: 'Monthly report, content-mix variance and three agreed experiments',
+    deliverable:
+      'Monthly report, content-mix variance and three agreed experiments',
     reminderHours: 48,
     active: true,
   },

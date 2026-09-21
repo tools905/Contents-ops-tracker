@@ -1096,7 +1096,7 @@ export default function ContentOpsApp({
         name: 'list_my_actions',
         title: 'List my actions',
         description:
-          'List the current login’s approval, review, metrics and assigned-work actions.',
+          'List the current login’s approvals, reviews, feedback and assigned work.',
         inputSchema: {
           type: 'object',
           properties: {},

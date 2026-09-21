@@ -18,7 +18,7 @@ const stageFromDb: Record<string, Stage> = {
   shoot: 'Shoot',
   production: 'Production',
   upload: 'Upload',
-  post_upload_metrics: 'Post-Upload Metrics',
+  post_upload_metrics: 'Post-Upload',
 };
 const statusFromDb: Record<string, StageStatus> = {
   in_progress: 'In progress',

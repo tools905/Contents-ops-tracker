@@ -4,7 +4,7 @@ export const PIPELINE = [
   'Shoot',
   'Production',
   'Upload',
-  'Post-Upload Metrics',
+  'Post-Upload',
 ] as const;
 export type Stage = (typeof PIPELINE)[number];
 export type AppRole =
@@ -31,11 +31,7 @@ export const STAGE_STEPS: Record<Stage, readonly string[]> = {
     'Priya final approval',
   ],
   Upload: ['Platform scheduling', 'Publishing'],
-  'Post-Upload Metrics': [
-    'Performance snapshot',
-    'Weekly or monthly reporting',
-    'Learning notes',
-  ],
+  'Post-Upload': ['Publish confirmation', 'Live link captured', 'Learning note'],
 };
 
 export const PLATFORM_CONTENT_TYPES: Record<string, readonly string[]> = {

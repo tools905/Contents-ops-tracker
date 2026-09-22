@@ -228,13 +228,7 @@ export default function ContentOpsApp({
   const [previewRole, setPreviewRole] = useState<
     Exclude<AppRole, 'Owner'> | null
   >(null);
-  const [needsPasswordSetup, setNeedsPasswordSetup] = useState(() =>
-    typeof window === 'undefined'
-      ? false
-      : /(?:#|[?&])type=(?:invite|recovery)(?:&|$)/.test(
-          `${window.location.hash}${window.location.search}`,
-        ),
-  );
+  const [needsPasswordSetup, setNeedsPasswordSetup] = useState(false);
   const [view, setView] = useState<View>('today');
   const [selectedId, setSelectedId] = useState<string>();
   const [createOpen, setCreateOpen] = useState(false);
@@ -264,6 +258,12 @@ export default function ContentOpsApp({
     },
     [],
   );
+
+  useEffect(() => {
+    const action = authActionFromLocation();
+    if (action === 'invite' || action === 'recovery')
+      setNeedsPasswordSetup(true);
+  }, []);
 
   useEffect(() => {
     const stored = window.localStorage.getItem('aafm-theme');
@@ -308,7 +308,13 @@ export default function ContentOpsApp({
       });
     const { data } = client.auth.onAuthStateChange((event, session) => {
       const user = session?.user ?? null;
-      if (event === 'PASSWORD_RECOVERY') setNeedsPasswordSetup(true);
+      const action = authActionFromLocation();
+      if (
+        event === 'PASSWORD_RECOVERY' ||
+        action === 'invite' ||
+        action === 'recovery'
+      )
+        setNeedsPasswordSetup(true);
       setAuthUser(user);
       if (user)
         void reloadLive(client, user).catch((error) =>
@@ -1184,8 +1190,11 @@ export default function ContentOpsApp({
         client={client!}
         email={authUser.email ?? ''}
         onComplete={() => {
-          window.history.replaceState({}, document.title, window.location.pathname);
           setNeedsPasswordSetup(false);
+          const url = new URL(window.location.href);
+          url.searchParams.delete('auth_action');
+          url.hash = '';
+          window.history.replaceState({}, '', `${url.pathname}${url.search}`);
         }}
         signOut={() => void client?.auth.signOut()}
       />
@@ -5658,10 +5667,24 @@ function LoginScreen({
   const [busy, setBusy] = useState(false);
   const submit = async (event: SyntheticEvent<HTMLFormElement>) => {
     event.preventDefault();
+    setNotice('');
     setBusy(true);
-    const { error } = await client.auth.signInWithPassword({ email, password });
-    if (error) setNotice(error.message);
-    setBusy(false);
+    try {
+      const { error } = await client.auth.signInWithPassword({
+        email: email.trim().toLowerCase(),
+        password,
+      });
+      if (error)
+        setNotice(
+          error.message.toLowerCase().includes('invalid login credentials')
+            ? 'That password is not active yet. Open your invitation email, or use “Set or reset password” below to create one.'
+            : error.message,
+        );
+    } catch {
+      setNotice('Sign-in could not be completed. Please try again.');
+    } finally {
+      setBusy(false);
+    }
   };
   const resetPassword = async () => {
     if (!email.trim()) {
@@ -5669,16 +5692,23 @@ function LoginScreen({
       return;
     }
     setBusy(true);
-    const { error } = await client.auth.resetPasswordForEmail(
-      email.trim().toLowerCase(),
-      { redirectTo: window.location.origin },
-    );
-    setNotice(
-      error
-        ? error.message
-        : 'Check your inbox for a secure password-reset link.',
-    );
-    setBusy(false);
+    try {
+      const redirect = new URL(window.location.origin);
+      redirect.searchParams.set('auth_action', 'recovery');
+      const { error } = await client.auth.resetPasswordForEmail(
+        email.trim().toLowerCase(),
+        { redirectTo: redirect.toString() },
+      );
+      setNotice(
+        error
+          ? error.message
+          : 'Password link sent. Open it to create your password, then return here to sign in.',
+      );
+    } catch {
+      setNotice('The password email could not be sent. Please try again.');
+    } finally {
+      setBusy(false);
+    }
   };
   return (
     <div className="grid min-h-svh place-items-center bg-background p-4">
@@ -5696,35 +5726,47 @@ function LoginScreen({
               Sign in to Content Operations
             </CardTitle>
             <CardDescription>
-              Use the email and password assigned by an Owner.
+              Sign in with the password you created from your invitation email.
             </CardDescription>
           </CardHeader>
           <CardContent>
             <form onSubmit={submit} className="space-y-4">
               <div>
-                <Label className="mb-1.5">Email</Label>
+                <Label htmlFor="login-email" className="mb-1.5">
+                  Email
+                </Label>
                 <Input
+                  id="login-email"
                   type="email"
+                  autoComplete="email"
                   value={email}
                   onChange={(event) => setEmail(event.target.value)}
                   required
                 />
               </div>
               <div>
-                <Label className="mb-1.5">Password</Label>
+                <Label htmlFor="login-password" className="mb-1.5">
+                  Password
+                </Label>
                 <Input
+                  id="login-password"
                   type="password"
+                  autoComplete="current-password"
                   value={password}
                   onChange={(event) => setPassword(event.target.value)}
                   required
                 />
               </div>
               {notice && (
-                <p className="text-sm text-[var(--danger-foreground)]">
+                <p
+                  role="status"
+                  aria-live="polite"
+                  className="text-sm text-[var(--danger-foreground)]"
+                >
                   {notice}
                 </p>
               )}
-              <Button className="w-full" disabled={busy}>
+              <Button type="submit" className="w-full" disabled={busy}>
                 {busy ? 'Signing in…' : 'Sign in'}
               </Button>
               <Button
@@ -5734,7 +5776,7 @@ function LoginScreen({
                 disabled={busy}
                 onClick={() => void resetPassword()}
               >
-                Forgot password?
+                Set or reset password
               </Button>
             </form>
           </CardContent>
@@ -5795,8 +5837,11 @@ function SetPasswordScreen({
         <CardContent>
           <form onSubmit={submit} className="space-y-4">
             <div>
-              <Label className="mb-1.5">New password</Label>
+              <Label htmlFor="new-password" className="mb-1.5">
+                New password
+              </Label>
               <Input
+                id="new-password"
                 type="password"
                 minLength={10}
                 autoComplete="new-password"
@@ -5806,8 +5851,11 @@ function SetPasswordScreen({
               />
             </div>
             <div>
-              <Label className="mb-1.5">Confirm password</Label>
+              <Label htmlFor="confirm-password" className="mb-1.5">
+                Confirm password
+              </Label>
               <Input
+                id="confirm-password"
                 type="password"
                 minLength={10}
                 autoComplete="new-password"
@@ -5821,7 +5869,7 @@ function SetPasswordScreen({
                 {message}
               </p>
             )}
-            <Button className="w-full" disabled={busy}>
+            <Button type="submit" className="w-full" disabled={busy}>
               {busy ? 'Saving…' : 'Save password'}
             </Button>
             <Button
@@ -5838,6 +5886,14 @@ function SetPasswordScreen({
     </div>
   );
 }
+
+function authActionFromLocation() {
+  if (typeof window === 'undefined') return null;
+  const search = new URLSearchParams(window.location.search);
+  const hash = new URLSearchParams(window.location.hash.replace(/^#/, ''));
+  return search.get('auth_action') ?? search.get('type') ?? hash.get('type');
+}
+
 function LoadingScreen() {
   return (
     <div className="grid min-h-svh place-items-center bg-background">

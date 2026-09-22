@@ -74,7 +74,10 @@ Deno.serve(async (request) => {
     return reply({ error: 'Choose at least one responsibility' }, 400);
 
   const origin = request.headers.get('origin');
-  const redirectTo = origin && /^https?:\/\//.test(origin) ? origin : undefined;
+  const redirectTo =
+    origin && /^https?:\/\//.test(origin)
+      ? `${origin}/?auth_action=invite`
+      : undefined;
   const { data: invited, error: inviteError } =
     await admin.auth.admin.inviteUserByEmail(email, {
       data: { full_name: fullName },

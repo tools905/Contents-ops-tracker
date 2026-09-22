@@ -20,12 +20,14 @@ export type StageStatus =
   | 'Changes requested'
   | 'Approved';
 export type ContentPillar = 'Knowledge' | 'Promotional' | 'AAFM India Insider';
+export type WorkflowRoute = 'Full production' | 'Design route' | 'Ad hoc fast track';
 
 export const STAGE_STEPS: Record<Stage, readonly string[]> = {
   Idea: ['Topic research', 'HOD input', 'Calendar slot'],
   Script: ['Drafting', 'Subject-matter validation', 'Financial compliance'],
   Shoot: ['Shoot brief', 'Recording'],
   Production: [
+    'Ad hoc publish check',
     'Edit or design',
     'Harshit quality check',
     'Priya final approval',
@@ -34,11 +36,24 @@ export const STAGE_STEPS: Record<Stage, readonly string[]> = {
   'Post-Upload': ['Publish confirmation', 'Live link captured', 'Learning note'],
 };
 
+export const ROUTE_STAGES: Record<WorkflowRoute, readonly Stage[]> = {
+  'Full production': PIPELINE,
+  'Design route': ['Idea', 'Production', 'Upload', 'Post-Upload'],
+  'Ad hoc fast track': ['Production', 'Upload', 'Post-Upload'],
+};
+
+export function nextRouteStage(item: Pick<ContentItem, 'stage' | 'workflowRoute'>) {
+  const route = ROUTE_STAGES[item.workflowRoute];
+  const index = route.indexOf(item.stage);
+  return index >= 0 ? route[index + 1] : undefined;
+}
+
 export const PLATFORM_CONTENT_TYPES: Record<string, readonly string[]> = {
   Instagram: ['Reel', 'Post', 'Carousel'],
   YouTube: ['Short', 'Video'],
   LinkedIn: ['Post', 'Carousel'],
   Facebook: ['Post', 'Carousel'],
+  X: ['Post'],
   'Multi-platform': ['Post', 'Carousel'],
 };
 
@@ -49,6 +64,7 @@ export type Person = {
   initials: string;
   roles: AppRole[];
   isActive?: boolean;
+  hasLogin?: boolean;
   responsibility?: string;
 };
 export type RaciAssignment = {
@@ -101,6 +117,8 @@ export type ContentItem = {
   contentType: string;
   platform: string;
   pillar: ContentPillar;
+  workflowRoute: WorkflowRoute;
+  sourceLabel?: string;
   workflowStep: string;
   stage: Stage;
   status: StageStatus;

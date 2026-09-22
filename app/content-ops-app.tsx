@@ -23,8 +23,10 @@ import {
   Clock3,
   ExternalLink,
   Eye,
+  FileDown,
   FileCheck2,
   FileText,
+  FileUp,
   GripVertical,
   LayoutDashboard,
   Link2,
@@ -43,6 +45,7 @@ import {
   UserRound,
   Users2,
   X,
+  Zap,
 } from 'lucide-react';
 
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
@@ -111,11 +114,13 @@ import {
   demoItems,
   demoPeople,
   demoRequests,
+  defaultRaci,
 } from '@/lib/demo-data';
 import {
   PIPELINE,
   PLATFORM_CONTENT_TYPES,
   STAGE_STEPS,
+  nextRouteStage,
   type AppRole,
   type CadenceFrequency,
   type CadenceRun,
@@ -128,9 +133,15 @@ import {
   type Person,
   type RaciAssignment,
   type Stage,
+  type WorkflowRoute,
 } from '@/lib/content-types';
 import { makeSupabaseClient, type SupabaseConfig } from '@/lib/supabase-client';
 import { loadLiveSnapshot } from '@/lib/supabase-data';
+import {
+  exportTrackerWorkbook,
+  parseMasterCalendar,
+  type CalendarImportRow,
+} from '@/lib/tracker-excel';
 
 type View =
   | 'today'
@@ -145,6 +156,7 @@ type MoveIntent = { item: ContentItem; toStage: Stage };
 type MetricDraft = Omit<MetricEntry, 'id' | 'source'>;
 type RaciIntent = { item: ContentItem; stage: Stage };
 type InviteDraft = {
+  profileId?: string;
   email: string;
   fullName: string;
   roles: Exclude<AppRole, 'Owner'>[];
@@ -232,7 +244,8 @@ export default function ContentOpsApp({
   const [view, setView] = useState<View>('today');
   const [selectedId, setSelectedId] = useState<string>();
   const [createOpen, setCreateOpen] = useState(false);
-  const [inviteOpen, setInviteOpen] = useState(false);
+  const [inviteTarget, setInviteTarget] = useState<Person | 'new'>();
+  const [importRows, setImportRows] = useState<CalendarImportRow[]>();
   const [raciIntent, setRaciIntent] = useState<RaciIntent>();
   const [cadenceEditor, setCadenceEditor] = useState<
     OperatingCadence | 'new'
@@ -451,18 +464,18 @@ export default function ContentOpsApp({
         });
         if (error) throw error;
       }, 'Approval recorded and item advanced.');
-    const index = PIPELINE.indexOf(item.stage);
-    const last = index === PIPELINE.length - 1;
+    const nextStage = nextRouteStage(item);
+    const last = !nextStage;
     setItems((all) =>
       all.map((row) =>
         row.id === item.id
           ? {
               ...row,
-              stage: last ? row.stage : PIPELINE[index + 1],
-              ...raciFor(row, last ? row.stage : PIPELINE[index + 1]),
+              stage: nextStage ?? row.stage,
+              ...raciFor(row, nextStage ?? row.stage),
               workflowStep: last
                 ? row.workflowStep
-                : STAGE_STEPS[PIPELINE[index + 1]][0],
+                : STAGE_STEPS[nextStage!][0],
               status: last ? 'Approved' : 'In progress',
               lifecycle: last ? 'Closed' : 'Active',
               dueAt: last
@@ -471,9 +484,7 @@ export default function ContentOpsApp({
               secondLens: reason
                 ? 'Overridden'
                 : last ||
-                    !['Script', 'Production'].includes(
-                      PIPELINE[index + 1] ?? '',
-                    )
+                    !['Script', 'Production'].includes(nextStage ?? '')
                   ? 'Not needed'
                   : 'Awaiting review',
               history: [
@@ -482,8 +493,8 @@ export default function ContentOpsApp({
                   action: last
                     ? 'Item closed'
                     : reason
-                      ? `Advanced without second-lens review → ${PIPELINE[index + 1]}`
-                      : `${row.stage} approved → ${PIPELINE[index + 1]}`,
+                      ? `Advanced without second-lens review → ${nextStage}`
+                      : `${row.stage} approved → ${nextStage}`,
                   actor: rolePerson.name,
                   at: 'Just now',
                   note: reason,
@@ -508,10 +519,10 @@ export default function ContentOpsApp({
   };
 
   const requestMove = (item: ContentItem, toStage: Stage) => {
-    const next = PIPELINE[PIPELINE.indexOf(item.stage) + 1];
+    const next = nextRouteStage(item);
     if (next !== toStage)
       return showNotice(
-        'Cards move one stage at a time so every handoff stays accountable.',
+        `This ${item.workflowRoute.toLowerCase()} moves next to ${next ?? 'closeout'}.`,
       );
     if (
       item.status === 'Pending approval' &&
@@ -569,7 +580,7 @@ export default function ContentOpsApp({
   const inviteUser = async (draft: InviteDraft) => {
     if (demoMode) {
       const person: Person = {
-        id: crypto.randomUUID(),
+        id: draft.profileId ?? crypto.randomUUID(),
         name: draft.fullName,
         email: draft.email,
         initials: draft.fullName
@@ -579,9 +590,14 @@ export default function ContentOpsApp({
           .join(''),
         roles: draft.roles,
         isActive: true,
+        hasLogin: true,
       };
-      setPeople((all) => [...all, person]);
-      setInviteOpen(false);
+      setPeople((all) =>
+        draft.profileId
+          ? all.map((entry) => (entry.id === draft.profileId ? person : entry))
+          : [...all, person],
+      );
+      setInviteTarget(undefined);
       return showNotice(`Demo invitation prepared for ${draft.email}.`);
     }
     const saved = await mutateLive(async (supabase) => {
@@ -589,12 +605,13 @@ export default function ContentOpsApp({
         body: {
           email: draft.email,
           fullName: draft.fullName,
+          profileId: draft.profileId,
           roles: draft.roles.map((role) => roleToDb[role]),
         },
       });
       if (error) throw error;
     }, `Invitation sent to ${draft.email}.`);
-    if (saved) setInviteOpen(false);
+    if (saved) setInviteTarget(undefined);
   };
 
   const requestChanges = async (item: ContentItem, note: string) => {
@@ -671,7 +688,7 @@ export default function ContentOpsApp({
           const { error } = await supabase.from('stage_reviews').insert({
             content_item_id: item.id,
             stage: stageToDb[item.stage],
-            reviewer_id: authUser!.id,
+            reviewer_id: currentUser.id,
             decision: approved ? 'approved' : 'changes_requested',
             note: note || null,
           });
@@ -730,7 +747,7 @@ export default function ContentOpsApp({
         const { error } = await supabase.from('comments').insert({
           content_item_id: item.id,
           parent_id: parentId ? Number(parentId) : null,
-          author_id: authUser!.id,
+          author_id: currentUser.id,
           body: body.trim(),
           stage: stageToDb[stage],
           kind: kind.toLowerCase(),
@@ -808,16 +825,13 @@ export default function ContentOpsApp({
     platform: string;
     pillar: ContentPillar;
     dueAt: string;
-    responsibleId: string;
+    workflowRoute: WorkflowRoute;
     accountableIds: string[];
-    consultedIds: string[];
-    informedIds: string[];
-    copyOwners: boolean;
   }) => {
     const creator = rolePerson;
     if (!demoMode) {
       const saved = await mutateLive(async (supabase) => {
-        const { error } = await supabase.rpc('create_content_with_raci', {
+        const { error } = await supabase.rpc('create_content_item', {
           p_title: draft.title,
           p_content_type: draft.contentType,
           p_platform: draft.platform,
@@ -825,47 +839,32 @@ export default function ContentOpsApp({
           p_due_at: draft.dueAt
             ? new Date(`${draft.dueAt}:00+05:30`).toISOString()
             : null,
-          p_responsible_id: draft.responsibleId,
+          p_workflow_route:
+            draft.workflowRoute === 'Ad hoc fast track'
+              ? 'ad_hoc'
+              : draft.workflowRoute === 'Design route'
+                ? 'design'
+                : 'full',
           p_accountable_ids: draft.accountableIds,
-          p_consulted_ids: draft.consultedIds,
-          p_informed_ids: draft.informedIds,
-          p_copy_all_stages: draft.copyOwners,
         });
         if (error) throw error;
       }, 'Content item created.');
       if (saved) setCreateOpen(false);
       return;
     }
-    const responsible = people.filter(
-      (person) => person.id === draft.responsibleId,
-    );
-    const accountable = people.filter((person) =>
-      draft.accountableIds.includes(person.id),
-    );
-    const consulted = people.filter((person) =>
-      draft.consultedIds.includes(person.id),
-    );
-    const informed = people.filter((person) =>
-      draft.informedIds.includes(person.id),
-    );
-    const assignment: RaciAssignment = {
-      responsible,
-      accountable,
-      consulted,
-      informed,
-    };
-    const emptyAssignment: RaciAssignment = {
-      responsible: [],
-      accountable: [],
-      consulted: [],
-      informed: [],
-    };
+    const initialStage: Stage =
+      draft.workflowRoute === 'Ad hoc fast track' ? 'Production' : 'Idea';
     const raci = Object.fromEntries(
-      PIPELINE.map((stage) => [
-        stage,
-        draft.copyOwners || stage === 'Idea' ? assignment : emptyAssignment,
-      ]),
+      PIPELINE.map((stage) => [stage, { ...defaultRaci[stage] }]),
     ) as Record<Stage, RaciAssignment>;
+    if (draft.accountableIds.length)
+      raci[initialStage] = {
+        ...raci[initialStage],
+        accountable: people.filter((person) =>
+          draft.accountableIds.includes(person.id),
+        ),
+      };
+    const assignment = raci[initialStage];
     setItems((all) => [
       {
         id: crypto.randomUUID(),
@@ -873,18 +872,22 @@ export default function ContentOpsApp({
         contentType: draft.contentType,
         platform: draft.platform,
         pillar: draft.pillar,
-        workflowStep: STAGE_STEPS.Idea[0],
-        stage: 'Idea',
+        workflowRoute: draft.workflowRoute,
+        workflowStep:
+          draft.workflowRoute === 'Ad hoc fast track'
+            ? 'Ad hoc publish check'
+            : STAGE_STEPS.Idea[0],
+        stage: initialStage,
         status: 'In progress',
         dueAt: draft.dueAt
           ? new Date(`${draft.dueAt}:00+05:30`).toISOString()
           : undefined,
         reminderHours: 24,
         lifecycle: 'Active',
-        responsible,
-        accountable,
-        consulted,
-        informed,
+        responsible: assignment.responsible,
+        accountable: assignment.accountable,
+        consulted: assignment.consulted,
+        informed: assignment.informed,
         raci,
         secondLens: 'Not needed',
         links: [],
@@ -900,6 +903,92 @@ export default function ContentOpsApp({
     showNotice('Content item created.');
   };
 
+  const prepareCalendarImport = async (file: File) => {
+    try {
+      const rows = await parseMasterCalendar(file);
+      if (!rows.length)
+        return showNotice(
+          'No dated content was found in the active/future plus prior 30-day window.',
+        );
+      setImportRows(rows);
+    } catch (error) {
+      showNotice(
+        error instanceof Error ? error.message : 'The Excel file could not be read.',
+      );
+    }
+  };
+
+  const importCalendar = async () => {
+    if (!importRows?.length) return;
+    if (!demoMode) {
+      const saved = await mutateLive(async (supabase) => {
+        const { error } = await supabase.rpc('bulk_import_content', {
+          p_items: importRows.map((row) => ({
+            source_key: row.sourceKey,
+            source_label: row.sourceLabel,
+            title: row.title,
+            platform: row.platform,
+            content_type: row.contentType,
+            content_pillar: pillarToDb[row.pillar],
+            due_at: row.dueAt,
+            current_stage: stageToDb[row.initialStage],
+            workflow_step: row.initialStep,
+            workflow_route:
+              row.workflowRoute === 'Full production' ? 'full' : 'design',
+          })),
+        });
+        if (error) throw error;
+      }, 'Master calendar imported. Existing matching rows were skipped.');
+      if (saved) setImportRows(undefined);
+      return;
+    }
+    const created: ContentItem[] = importRows.map((row) => {
+      const raci = Object.fromEntries(
+        PIPELINE.map((stage) => [stage, { ...defaultRaci[stage] }]),
+      ) as Record<Stage, RaciAssignment>;
+      return {
+        id: crypto.randomUUID(),
+        title: row.title,
+        contentType: row.contentType,
+        platform: row.platform,
+        pillar: row.pillar,
+        workflowRoute: row.workflowRoute,
+        sourceLabel: row.sourceLabel,
+        workflowStep: row.initialStep,
+        stage: row.initialStage,
+        status: 'In progress',
+        dueAt: row.dueAt,
+        reminderHours: 24,
+        lifecycle: 'Active',
+        ...raciFor({ raci } as ContentItem, row.initialStage),
+        raci,
+        secondLens: 'Not needed',
+        links: [],
+        comments: [],
+        metrics: [],
+        history: [
+          {
+            action: 'Imported from master calendar',
+            actor: rolePerson.name,
+            at: 'Just now',
+          },
+        ],
+      };
+    });
+    setItems((all) => [...created, ...all]);
+    setImportRows(undefined);
+    showNotice(`${created.length} calendar rows imported into the pipeline.`);
+  };
+
+  const exportWorkbook = async () => {
+    try {
+      await exportTrackerWorkbook({ items: visibleItems, people, cadences, requests });
+      showNotice('Excel export downloaded.');
+    } catch (error) {
+      showNotice(error instanceof Error ? error.message : 'Excel export failed.');
+    }
+  };
+
   const addRequest = async (
     request: Omit<DepartmentRequest, 'id' | 'status'>,
   ) => {
@@ -911,7 +1000,7 @@ export default function ContentOpsApp({
           request_text: request.request,
           priority: request.priority.toLowerCase(),
           needed_by: request.neededBy,
-          created_by: authUser!.id,
+          created_by: currentUser.id,
         });
         if (error) throw error;
       }, 'Content request submitted.');
@@ -1061,7 +1150,7 @@ export default function ContentOpsApp({
             cadence_id: cadence.id,
             scheduled_for: scheduledFor,
             status: 'complete',
-            completed_by: authUser!.id,
+            completed_by: currentUser.id,
             completed_at: new Date().toISOString(),
           },
           { onConflict: 'cadence_id,scheduled_for' },
@@ -1451,8 +1540,11 @@ export default function ContentOpsApp({
               items={visibleItems}
               roles={effectiveRoles}
               person={rolePerson}
+              canImport={canManageOperations}
               onOpen={(id) => setSelectedId(id)}
               onMove={requestMove}
+              onImport={prepareCalendarImport}
+              onExport={() => void exportWorkbook()}
             />
           )}
           {view === 'raci' && (
@@ -1495,7 +1587,8 @@ export default function ContentOpsApp({
               people={people}
               demoMode={demoMode}
               canManageAccess={canManageAccess}
-              onInvite={() => setInviteOpen(true)}
+              onInvite={() => setInviteTarget('new')}
+              onInvitePerson={(person) => setInviteTarget(person)}
               onManage={manageAccess}
             />
           )}
@@ -1503,16 +1596,25 @@ export default function ContentOpsApp({
         </main>
       </SidebarInset>
       <CreateDialog
+        key={people.map((person) => person.id).join(':')}
         open={createOpen}
         onOpenChange={setCreateOpen}
         people={people}
         onCreate={createItem}
       />
       <InviteUserDialog
-        open={inviteOpen}
-        onOpenChange={setInviteOpen}
+        key={inviteTarget === 'new' ? 'new' : inviteTarget?.id ?? 'closed'}
+        open={Boolean(inviteTarget)}
+        onOpenChange={(open) => !open && setInviteTarget(undefined)}
+        person={inviteTarget === 'new' ? undefined : inviteTarget}
         onInvite={inviteUser}
         canAssignAccess={canManageAccess}
+      />
+      <CalendarImportDialog
+        rows={importRows}
+        onOpenChange={(open) => !open && setImportRows(undefined)}
+        onImport={() => void importCalendar()}
+        busy={busy}
       />
       <ItemDetail
         open={Boolean(selected)}
@@ -2263,14 +2365,20 @@ function Pipeline({
   items,
   roles,
   person,
+  canImport,
   onOpen,
   onMove,
+  onImport,
+  onExport,
 }: {
   items: ContentItem[];
   roles: AppRole[];
   person: Person;
+  canImport: boolean;
   onOpen: (id: string) => void;
   onMove: (item: ContentItem, stage: Stage) => void;
+  onImport: (file: File) => void;
+  onExport: () => void;
 }) {
   const stageStyles = [
     'border-t-[#77809b] bg-[var(--pipeline-neutral)]',
@@ -2280,6 +2388,18 @@ function Pipeline({
     'border-t-[#3b9171] bg-[var(--pipeline-upload)]',
     'border-t-[#77809b] bg-[var(--pipeline-neutral)]',
   ];
+  const columns: Array<
+    | { key: Stage; stage: Stage; index: number }
+    | { key: 'ad-hoc'; stage: 'Production'; index: 3 }
+  > = [
+    { key: 'Idea', stage: 'Idea', index: 0 },
+    { key: 'Script', stage: 'Script', index: 1 },
+    { key: 'Shoot', stage: 'Shoot', index: 2 },
+    { key: 'ad-hoc', stage: 'Production', index: 3 },
+    { key: 'Production', stage: 'Production', index: 3 },
+    { key: 'Upload', stage: 'Upload', index: 4 },
+    { key: 'Post-Upload', stage: 'Post-Upload', index: 5 },
+  ];
   return (
     <>
       <div className="mb-6 flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
@@ -2288,20 +2408,53 @@ function Pipeline({
           title="Six headings. Every departmental checkpoint."
           description="Research, compliance, creative approvals, publishing and reporting stay visible inside the six stages your team already knows."
         />
-        <div className="mb-7 flex shrink-0 items-center gap-2 rounded-xl border border-border bg-card px-3 py-2 text-sm text-muted-foreground">
-          <GripVertical className="size-4 text-[#9a6908]" /> Dragging always
-          asks for confirmation
+        <div className="mb-7 flex flex-wrap items-center justify-end gap-2">
+          {canImport && (
+            <label className="inline-flex h-9 cursor-pointer items-center gap-2 rounded-md border border-border bg-card px-3 text-sm font-medium text-card-foreground shadow-sm hover:bg-muted">
+              <FileUp className="size-4" /> Import calendar
+              <input
+                type="file"
+                accept=".xlsx"
+                className="sr-only"
+                onChange={(event) => {
+                  const file = event.target.files?.[0];
+                  if (file) onImport(file);
+                  event.currentTarget.value = '';
+                }}
+              />
+            </label>
+          )}
+          <Button variant="outline" size="sm" onClick={onExport}>
+            <FileDown /> Export Excel
+          </Button>
         </div>
       </div>
+      <Alert className="mb-4 border-border bg-card">
+        <GripVertical />
+        <AlertTitle>Every move is confirmed</AlertTitle>
+        <AlertDescription>
+          Full production uses all six stages. Posts and carousels can use the
+          design route. Same-day requests enter the amber ad hoc checkpoint
+          before Upload.
+        </AlertDescription>
+      </Alert>
       <div className="-mx-4 overflow-x-auto px-4 pb-4 sm:-mx-7 sm:px-7 lg:-mx-10 lg:px-10">
-        <div className="grid min-w-max grid-cols-6 gap-4">
-          {PIPELINE.map((stage, index) => {
+        <div className="grid min-w-max grid-cols-7 gap-4">
+          {columns.map((column) => {
+            const { stage, index } = column;
+            const adHocLane = column.key === 'ad-hoc';
             const rows = items.filter(
-              (item) => item.stage === stage && item.lifecycle === 'Active',
+              (item) =>
+                item.stage === stage &&
+                item.lifecycle === 'Active' &&
+                (stage !== 'Production' ||
+                  (adHocLane
+                    ? item.workflowRoute === 'Ad hoc fast track'
+                    : item.workflowRoute !== 'Ad hoc fast track')),
             );
             return (
               <section
-                key={stage}
+                key={column.key}
                 onDragOver={(event) => event.preventDefault()}
                 onDrop={(event) => {
                   event.preventDefault();
@@ -2310,20 +2463,28 @@ function Pipeline({
                       entry.id ===
                       event.dataTransfer.getData('text/content-item'),
                   );
-                  if (item) onMove(item, stage);
+                  if (item && !adHocLane) onMove(item, stage);
                 }}
-                className={`w-[286px] rounded-2xl border border-t-4 border-border p-3 ${stageStyles[index]}`}
+                className={`w-[286px] rounded-2xl border border-t-4 border-border p-3 ${
+                  adHocLane
+                    ? 'border-t-[#f0a62b] bg-[var(--warning-subtle)]'
+                    : stageStyles[index]
+                }`}
               >
                 <div className="mb-3 flex items-center justify-between px-1 py-1">
                   <div className="min-w-0">
                     <p className="text-xs font-semibold text-[var(--warning-foreground)]">
-                      0{index + 1}
+                      {adHocLane ? 'FAST TRACK' : `0${index + 1}`}
                     </p>
                     <h2 className="mt-0.5 text-base font-semibold text-card-foreground">
-                      {stage}
+                      {adHocLane ? 'Ad hoc checkpoint' : stage}
                     </h2>
                     <p className="mt-1 max-w-[220px] text-[11px] leading-relaxed text-muted-foreground">
-                      {STAGE_STEPS[stage].join(' · ')}
+                      {adHocLane
+                        ? 'Same-day readiness · approval · direct to Upload'
+                        : STAGE_STEPS[stage]
+                            .filter((step) => step !== 'Ad hoc publish check')
+                            .join(' · ')}
                     </p>
                   </div>
                   <Badge className="bg-card text-card-foreground shadow-sm">
@@ -2336,7 +2497,7 @@ function Pipeline({
                       item.status === 'Pending approval'
                         ? canApproveItem(item, roles, person)
                         : canSubmitItem(item, roles, person);
-                    const next = PIPELINE[index + 1];
+                    const next = nextRouteStage(item);
                     const openFeedback = item.comments.filter(
                       (comment) =>
                         comment.stage === item.stage &&
@@ -2378,6 +2539,11 @@ function Pipeline({
                           </button>
                         </div>
                         <div className="mt-3 flex flex-wrap gap-1.5">
+                          {item.workflowRoute === 'Ad hoc fast track' && (
+                            <Badge className="bg-[#f0a62b] text-[#241a05]">
+                              <Zap /> Ad hoc
+                            </Badge>
+                          )}
                           <PillarBadge pillar={item.pillar} />
                           <StatusBadge item={item} />
                           {openFeedback > 0 && (
@@ -2422,7 +2588,9 @@ function Pipeline({
                   })}
                   {!rows.length && (
                     <div className="rounded-xl border border-dashed border-border bg-card/45 px-3 py-10 text-center text-sm text-muted-foreground">
-                      Drop the next item here
+                      {adHocLane
+                        ? 'New same-day requests appear here'
+                        : 'Drop the next item here'}
                     </div>
                   )}
                 </div>
@@ -3823,12 +3991,14 @@ function People({
   demoMode,
   canManageAccess,
   onInvite,
+  onInvitePerson,
   onManage,
 }: {
   people: Person[];
   demoMode: boolean;
   canManageAccess: boolean;
   onInvite: () => void;
+  onInvitePerson: (person: Person) => void;
   onManage: (person: Person, active: boolean, roles: AppRole[]) => void;
 }) {
   const owners = people.filter((person) => person.roles.includes('Owner'));
@@ -3837,7 +4007,7 @@ function People({
       <PageTitle
         eyebrow="PEOPLE & ACCESS"
         title="Give each person only what they need."
-        description="Owners and Admins can invite teammates. Aditi is the protected Owner and the only person who can activate, pause or change access."
+        description="The full operating team stays visible even before they receive a login. Owners and Admins can invite; only Aditi can activate, pause or change access."
         action={
           <Button onClick={onInvite}>
             <Plus /> Invite teammate
@@ -3869,9 +4039,10 @@ function People({
       <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
         {people.map((person) => (
           <AccessCard
-            key={person.id}
+            key={`${person.id}-${person.hasLogin}-${person.isActive}-${person.roles.join(':')}`}
             person={person}
             canManage={canManageAccess}
+            onInvite={() => onInvitePerson(person)}
             onManage={onManage}
           />
         ))}
@@ -3883,10 +4054,12 @@ function People({
 function AccessCard({
   person,
   canManage,
+  onInvite,
   onManage,
 }: {
   person: Person;
   canManage: boolean;
+  onInvite: () => void;
   onManage: (person: Person, active: boolean, roles: AppRole[]) => void;
 }) {
   const isOwner = person.roles.includes('Owner');
@@ -3909,7 +4082,7 @@ function AccessCard({
           <div className="min-w-0 flex-1">
             <CardTitle className="truncate">{person.name}</CardTitle>
             <CardDescription className="truncate">
-              {person.email}
+              {person.email || 'No email added yet'}
             </CardDescription>
           </div>
           {isOwner && <Badge className="bg-[#1f2342] text-white">Owner</Badge>}
@@ -3929,10 +4102,11 @@ function AccessCard({
         ) : canManage ? (
           <>
             <div className="mb-3 flex items-center justify-between rounded-xl border border-border p-3 text-sm font-medium">
-              <span>App access</span>
+              <span>{person.hasLogin ? 'App access' : 'Invite required'}</span>
               <Checkbox
                 aria-label="Toggle app access"
                 checked={active}
+                disabled={!person.hasLogin}
                 onCheckedChange={(checked) => setActive(Boolean(checked))}
               />
             </div>
@@ -3958,11 +4132,16 @@ function AccessCard({
             </div>
             <Button
               className="mt-4 w-full"
-              disabled={active && roles.length === 0}
-              onClick={() => onManage(person, active, roles)}
+              disabled={(active && roles.length === 0) || !person.hasLogin}
+              onClick={() => onManage(person, person.hasLogin ? active : false, roles)}
             >
-              Save access
+              {person.hasLogin ? 'Save access' : 'Save after invitation'}
             </Button>
+            {!person.hasLogin && (
+              <Button variant="outline" className="mt-2 w-full" onClick={onInvite}>
+                <Send /> Add email & invite
+              </Button>
+            )}
           </>
         ) : (
           <div className="space-y-3">
@@ -3971,7 +4150,11 @@ function AccessCard({
               <Badge
                 variant={person.isActive === false ? 'outline' : 'secondary'}
               >
-                {person.isActive === false ? 'Paused' : 'Active'}
+                {!person.hasLogin
+                  ? 'Not invited'
+                  : person.isActive === false
+                    ? 'Paused'
+                    : 'Active'}
               </Badge>
             </div>
             <div className="flex flex-wrap gap-2">
@@ -3984,6 +4167,11 @@ function AccessCard({
             <p className="text-sm text-muted-foreground">
               Owners manage existing access. Admins can invite new teammates.
             </p>
+            {!person.hasLogin && (
+              <Button variant="outline" className="w-full" onClick={onInvite}>
+                <Send /> Add email & invite
+              </Button>
+            )}
           </div>
         )}
       </CardContent>
@@ -4044,7 +4232,7 @@ function Settings({ demoMode }: { demoMode: boolean }) {
               </div>
               <div className="flex justify-between gap-4">
                 <span className="text-muted-foreground">Owner IDs</span>
-                <strong>2 protected slots</strong>
+                <strong>1 protected Owner · Aditi</strong>
               </div>
               <div className="flex justify-between gap-4">
                 <span className="text-muted-foreground">Authentication</span>
@@ -4147,12 +4335,19 @@ function ItemDetail({
   const readOnly = roles.length === 1 && roles[0] === 'Read-only Stakeholder';
   const canSubmit = canSubmitItem(item, roles, person);
   const canApprove = canApproveItem(item, roles, person);
+  const visibleSteps =
+    item.workflowRoute === 'Ad hoc fast track' && item.stage === 'Production'
+      ? ['Ad hoc publish check']
+      : STAGE_STEPS[item.stage].filter(
+          (step) => step !== 'Ad hoc publish check',
+        );
   return (
     <Sheet open={open} onOpenChange={onOpenChange}>
       <SheetContent className="w-full overflow-y-auto sm:max-w-2xl">
         <SheetHeader className="border-b px-5 py-5">
           <div className="flex flex-wrap items-center gap-2 pr-8">
             <Badge variant="secondary">{item.stage}</Badge>
+            <Badge variant="outline">{item.workflowRoute}</Badge>
             <PillarBadge pillar={item.pillar} />
             <StatusBadge item={item} />
             {isOverdue(item) && <Badge variant="destructive">Overdue</Badge>}
@@ -4162,6 +4357,7 @@ function ItemDetail({
           </SheetTitle>
           <SheetDescription>
             {item.contentType} · {item.platform} · Due {dueLabel(item)}
+            {item.sourceLabel ? ` · ${item.sourceLabel}` : ''}
           </SheetDescription>
         </SheetHeader>
 
@@ -4202,10 +4398,8 @@ function ItemDetail({
                   Checkpoint inside {item.stage}
                 </p>
                 <div className="grid gap-2">
-                  {STAGE_STEPS[item.stage].map((step, index) => {
-                    const currentIndex = STAGE_STEPS[item.stage].indexOf(
-                      item.workflowStep,
-                    );
+                  {visibleSteps.map((step, index) => {
+                    const currentIndex = visibleSteps.indexOf(item.workflowStep);
                     const complete = index < currentIndex;
                     const active = step === item.workflowStep;
                     return (
@@ -4764,7 +4958,7 @@ function RaciDialog({
           <RaciEditor
             key={`${intent.item.id}-${intent.stage}`}
             assignment={raciFor(intent.item, intent.stage)}
-            people={people.filter((person) => person.isActive !== false)}
+            people={people}
             onCancel={() => onOpenChange(false)}
             onSave={(assignment) =>
               onSave(intent.item, intent.stage, assignment)
@@ -4907,7 +5101,7 @@ function CadenceDialog({
           <CadenceEditor
             key={cadence === 'new' ? 'new' : cadence.id}
             cadence={cadence === 'new' ? undefined : cadence}
-            people={people.filter((person) => person.isActive !== false)}
+            people={people}
             onCancel={() => onOpenChange(false)}
             onSave={onSave}
           />
@@ -5176,18 +5370,22 @@ function CadenceEditor({
 function InviteUserDialog({
   open,
   onOpenChange,
+  person,
   onInvite,
   canAssignAccess,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
+  person?: Person;
   onInvite: (draft: InviteDraft) => void;
   canAssignAccess: boolean;
 }) {
-  const [fullName, setFullName] = useState('');
-  const [email, setEmail] = useState('');
+  const [fullName, setFullName] = useState(person?.name ?? '');
+  const [email, setEmail] = useState(person?.email ?? '');
   const [roles, setRoles] = useState<Exclude<AppRole, 'Owner'>[]>([
-    'Content Producer',
+    ...(person?.roles.filter(
+      (role): role is Exclude<AppRole, 'Owner'> => role !== 'Owner',
+    ) ?? ['Content Producer']),
   ]);
   const assignable: Exclude<AppRole, 'Owner'>[] = [
     'Admin',
@@ -5212,6 +5410,7 @@ function InviteUserDialog({
             event.preventDefault();
             if (canAssignAccess && !roles.length) return;
             onInvite({
+              profileId: person?.id,
               email: email.trim().toLowerCase(),
               fullName: fullName.trim(),
               roles: canAssignAccess ? roles : [],
@@ -5223,6 +5422,7 @@ function InviteUserDialog({
             <Input
               required
               value={fullName}
+              readOnly={Boolean(person)}
               onChange={(event) => setFullName(event.target.value)}
               placeholder="Full name"
             />
@@ -5300,6 +5500,102 @@ function InviteUserDialog({
   );
 }
 
+function CalendarImportDialog({
+  rows,
+  onOpenChange,
+  onImport,
+  busy,
+}: {
+  rows?: CalendarImportRow[];
+  onOpenChange: (open: boolean) => void;
+  onImport: () => void;
+  busy: boolean;
+}) {
+  const platformCounts = (rows ?? []).reduce<Record<string, number>>(
+    (counts, row) => ({
+      ...counts,
+      [row.platform]: (counts[row.platform] ?? 0) + 1,
+    }),
+    {},
+  );
+  return (
+    <Dialog open={Boolean(rows)} onOpenChange={onOpenChange}>
+      <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-4xl">
+        <DialogHeader>
+          <DialogTitle className="font-display text-xl">
+            Import master calendar
+          </DialogTitle>
+          <DialogDescription>
+            Active and future rows plus the prior 30 days will be added as
+            separate platform-specific items. Matching rows already imported
+            are skipped.
+          </DialogDescription>
+        </DialogHeader>
+        <div className="flex flex-wrap gap-2">
+          <Badge className="bg-[#1f2342] text-white">
+            {(rows ?? []).length} items
+          </Badge>
+          {Object.entries(platformCounts).map(([platform, count]) => (
+            <Badge key={platform} variant="outline">
+              {platform}: {count}
+            </Badge>
+          ))}
+        </div>
+        <div className="overflow-hidden rounded-xl border border-border">
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead>Date</TableHead>
+                <TableHead>Content</TableHead>
+                <TableHead>Platform</TableHead>
+                <TableHead>Starts in</TableHead>
+                <TableHead>Route</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {(rows ?? []).slice(0, 20).map((row) => (
+                <TableRow key={row.sourceKey}>
+                  <TableCell className="whitespace-nowrap">
+                    {new Date(row.dueAt).toLocaleDateString('en-IN', {
+                      timeZone: 'Asia/Kolkata',
+                      day: 'numeric',
+                      month: 'short',
+                      year: 'numeric',
+                    })}
+                  </TableCell>
+                  <TableCell>
+                    <p className="font-medium">{row.title}</p>
+                    <p className="text-xs text-muted-foreground">
+                      {row.contentType} · {row.pillar}
+                    </p>
+                  </TableCell>
+                  <TableCell>{row.platform}</TableCell>
+                  <TableCell>{row.initialStage}</TableCell>
+                  <TableCell>{row.workflowRoute}</TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        </div>
+        {(rows?.length ?? 0) > 20 && (
+          <p className="text-sm text-muted-foreground">
+            Showing the first 20 rows. All {rows?.length} rows will be checked
+            during import.
+          </p>
+        )}
+        <DialogFooter>
+          <Button variant="outline" onClick={() => onOpenChange(false)}>
+            Cancel
+          </Button>
+          <Button onClick={onImport} disabled={busy || !rows?.length}>
+            <FileUp /> {busy ? 'Importing…' : 'Import into pipeline'}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
 function CreateDialog({
   open,
   onOpenChange,
@@ -5315,11 +5611,8 @@ function CreateDialog({
     platform: string;
     pillar: ContentPillar;
     dueAt: string;
-    responsibleId: string;
+    workflowRoute: WorkflowRoute;
     accountableIds: string[];
-    consultedIds: string[];
-    informedIds: string[];
-    copyOwners: boolean;
   }) => void;
 }) {
   const [title, setTitle] = useState('');
@@ -5329,28 +5622,26 @@ function CreateDialog({
   );
   const [pillar, setPillar] = useState<ContentPillar>('Knowledge');
   const [dueAt, setDueAt] = useState('');
-  const [responsibleId, setResponsibleId] = useState(
-    people[1]?.id ?? people[0]?.id ?? '',
+  const [workflowRoute, setWorkflowRoute] =
+    useState<WorkflowRoute>('Full production');
+  const recommendedAccountable = people.find(
+    (person) => person.name.toLowerCase() === 'priya',
   );
-  const [accountableIds, setAccountableIds] = useState<string[]>([]);
-  const [consultedIds, setConsultedIds] = useState<string[]>([]);
-  const [informedIds, setInformedIds] = useState<string[]>([]);
-  const [copyOwners, setCopyOwners] = useState(true);
+  const [accountableIds, setAccountableIds] = useState<string[]>(
+    recommendedAccountable ? [recommendedAccountable.id] : [],
+  );
   const availableTypes = PLATFORM_CONTENT_TYPES[platform];
   const submit = (event: SyntheticEvent<HTMLFormElement>) => {
     event.preventDefault();
-    if (!title.trim() || !responsibleId || !accountableIds.length) return;
+    if (!title.trim() || !accountableIds.length) return;
     onCreate({
       title: title.trim(),
       contentType,
       platform,
       pillar,
       dueAt,
-      responsibleId,
+      workflowRoute,
       accountableIds,
-      consultedIds,
-      informedIds,
-      copyOwners,
     });
     setTitle('');
   };
@@ -5362,8 +5653,8 @@ function CreateDialog({
             Create content item
           </DialogTitle>
           <DialogDescription>
-            Start at Topic research inside Idea, then assign the people who will
-            move it forward.
+            Choose the route. The team’s agreed RACI is applied automatically
+            at every stage; Admin can still adjust a stage later.
           </DialogDescription>
         </DialogHeader>
         <form onSubmit={submit} className="space-y-4">
@@ -5382,7 +5673,15 @@ function CreateDialog({
               <NativeSelect
                 className="w-full"
                 value={contentType}
-                onChange={(event) => setContentType(event.target.value)}
+                onChange={(event) => {
+                  const nextType = event.target.value;
+                  setContentType(nextType);
+                  setWorkflowRoute(
+                    ['Reel', 'Short', 'Video'].includes(nextType)
+                      ? 'Full production'
+                      : 'Design route',
+                  );
+                }}
               >
                 {availableTypes.map((value) => (
                   <NativeSelectOption key={value}>{value}</NativeSelectOption>
@@ -5396,8 +5695,14 @@ function CreateDialog({
                 value={platform}
                 onChange={(event) => {
                   const nextPlatform = event.target.value;
+                  const nextType = PLATFORM_CONTENT_TYPES[nextPlatform][0];
                   setPlatform(nextPlatform);
-                  setContentType(PLATFORM_CONTENT_TYPES[nextPlatform][0]);
+                  setContentType(nextType);
+                  setWorkflowRoute(
+                    ['Reel', 'Short', 'Video'].includes(nextType)
+                      ? 'Full production'
+                      : 'Design route',
+                  );
                 }}
               >
                 {[
@@ -5405,6 +5710,7 @@ function CreateDialog({
                   'YouTube',
                   'LinkedIn',
                   'Facebook',
+                  'X',
                   'Multi-platform',
                 ].map((value) => (
                   <NativeSelectOption key={value}>{value}</NativeSelectOption>
@@ -5428,7 +5734,7 @@ function CreateDialog({
           </div>
           <div className="grid gap-3 sm:grid-cols-2">
             <div>
-              <Label className="mb-1.5">Idea due date</Label>
+              <Label className="mb-1.5">Due date</Label>
               <Input
                 type="datetime-local"
                 value={dueAt}
@@ -5436,20 +5742,37 @@ function CreateDialog({
               />
             </div>
             <div>
-              <Label className="mb-1.5">Responsible producer</Label>
+              <Label className="mb-1.5">Workflow route</Label>
               <NativeSelect
                 className="w-full"
-                value={responsibleId}
-                onChange={(event) => setResponsibleId(event.target.value)}
+                value={workflowRoute}
+                onChange={(event) =>
+                  setWorkflowRoute(event.target.value as WorkflowRoute)
+                }
               >
-                {people.map((person) => (
-                  <NativeSelectOption key={person.id} value={person.id}>
-                    {person.name}
-                  </NativeSelectOption>
-                ))}
+                <NativeSelectOption>Full production</NativeSelectOption>
+                <NativeSelectOption>Design route</NativeSelectOption>
+                <NativeSelectOption>Ad hoc fast track</NativeSelectOption>
               </NativeSelect>
             </div>
           </div>
+          <Alert
+            className={
+              workflowRoute === 'Ad hoc fast track'
+                ? 'border-[#dfa126]/45 bg-[var(--warning-subtle)]'
+                : 'border-border bg-muted/40'
+            }
+          >
+            {workflowRoute === 'Ad hoc fast track' ? <Zap /> : <ShieldCheck />}
+            <AlertTitle>{workflowRoute}</AlertTitle>
+            <AlertDescription>
+              {workflowRoute === 'Full production'
+                ? 'Idea → Script → Shoot → Production → Upload → Post-Upload'
+                : workflowRoute === 'Design route'
+                  ? 'Idea → Production → Upload → Post-Upload'
+                  : 'Ad hoc checkpoint → Upload → Post-Upload. Use only for same-day work.'}
+            </AlertDescription>
+          </Alert>
           <div>
             <Label>Accountable owners</Label>
             <p className="mb-2 mt-1 text-xs text-muted-foreground">
@@ -5476,70 +5799,6 @@ function CreateDialog({
                 </label>
               ))}
             </div>
-          </div>
-          <div className="grid gap-4 sm:grid-cols-2">
-            {[
-              {
-                label: 'Consulted',
-                description: 'People who give input before approval',
-                ids: consultedIds,
-                setIds: setConsultedIds,
-              },
-              {
-                label: 'Informed',
-                description: 'People who receive progress updates',
-                ids: informedIds,
-                setIds: setInformedIds,
-              },
-            ].map(({ label, description, ids, setIds }) => (
-              <div key={label}>
-                <Label>{label}</Label>
-                <p className="mb-2 mt-1 text-sm text-muted-foreground">
-                  {description}
-                </p>
-                <div className="space-y-2">
-                  {people
-                    .filter((person) => person.isActive !== false)
-                    .map((person) => (
-                      <label
-                        key={person.id}
-                        className="flex cursor-pointer items-center gap-2 text-sm"
-                      >
-                        <Checkbox
-                          checked={ids.includes(person.id)}
-                          onCheckedChange={(checked) =>
-                            setIds(
-                              checked
-                                ? [
-                                    ...ids.filter((id) => id !== person.id),
-                                    person.id,
-                                  ]
-                                : ids.filter((id) => id !== person.id),
-                            )
-                          }
-                        />
-                        {person.name}
-                      </label>
-                    ))}
-                </div>
-              </div>
-            ))}
-          </div>
-          <div className="flex items-start gap-3 rounded-xl bg-muted p-3 text-sm">
-            <Checkbox
-              aria-label="Copy full RACI assignments to all stages"
-              checked={copyOwners}
-              onCheckedChange={(checked) => setCopyOwners(Boolean(checked))}
-            />
-            <span>
-              <strong className="block text-card-foreground">
-                Plan the full RACI ahead
-              </strong>
-              <span className="text-muted-foreground">
-                Copy all four assignments across all six stages. Admin can
-                revise each stage later.
-              </span>
-            </span>
           </div>
           <DialogFooter className="mx-0 mb-0">
             <Button

@@ -10,6 +10,7 @@ import type {
   RaciAssignment,
   Stage,
   StageStatus,
+  WorkflowRoute,
 } from './content-types';
 
 const stageFromDb: Record<string, Stage> = {
@@ -37,6 +38,11 @@ const pillarFromDb: Record<string, ContentPillar> = {
   knowledge: 'Knowledge',
   promotional: 'Promotional',
   aafm_india_insider: 'AAFM India Insider',
+};
+const routeFromDb: Record<string, WorkflowRoute> = {
+  full: 'Full production',
+  design: 'Design route',
+  ad_hoc: 'Ad hoc fast track',
 };
 function initials(name: string) {
   return name
@@ -77,7 +83,9 @@ export async function loadLiveSnapshot(
     cadenceParticipantsRes,
     cadenceRunsRes,
   ] = await Promise.all([
-    client.from('profiles').select('id,email,full_name,is_active'),
+    client
+      .from('profiles')
+      .select('id,auth_user_id,email,full_name,is_active,responsibility'),
     client.from('workspace_owners').select('profile_id,slot'),
     client.from('user_roles').select('profile_id,role'),
     client
@@ -136,7 +144,8 @@ export async function loadLiveSnapshot(
 
   const roleRows = rolesRes.data ?? [];
   const people: Person[] = (profilesRes.data ?? []).map((profile) => {
-    const name = profile.full_name || profile.email.split('@')[0];
+    const name =
+      profile.full_name || profile.email?.split('@')[0] || 'Team member';
     const roles = roleRows
       .filter((row) => row.profile_id === profile.id)
       .map((row) => roleFromDb[row.role])
@@ -145,11 +154,13 @@ export async function loadLiveSnapshot(
       roles.unshift('Owner');
     return {
       id: profile.id,
-      email: profile.email,
+      email: profile.email ?? '',
       name,
       initials: initials(name),
       roles,
       isActive: profile.is_active,
+      hasLogin: Boolean(profile.auth_user_id),
+      responsibility: profile.responsibility ?? undefined,
     };
   });
   const personById = new Map(people.map((person) => [person.id, person]));
@@ -210,6 +221,8 @@ export async function loadLiveSnapshot(
       contentType: row.content_type,
       platform: row.platform,
       pillar: pillarFromDb[row.content_pillar] ?? 'Knowledge',
+      workflowRoute: routeFromDb[row.workflow_route] ?? 'Full production',
+      sourceLabel: row.source_label ?? undefined,
       workflowStep: row.workflow_step ?? stageFromDb[row.current_stage],
       stage: stageFromDb[row.current_stage],
       status: statusFromDb[row.stage_status],
@@ -300,8 +313,10 @@ export async function loadLiveSnapshot(
     } as ContentItem;
   });
 
-  const profile = (profilesRes.data ?? []).find((row) => row.id === user.id);
-  const currentUser = people.find((person) => person.id === user.id) ?? {
+  const profile = (profilesRes.data ?? []).find(
+    (row) => row.auth_user_id === user.id,
+  );
+  const currentUser = people.find((person) => person.id === profile?.id) ?? {
     id: user.id,
     email: user.email ?? '',
     name: user.email?.split('@')[0] ?? 'User',

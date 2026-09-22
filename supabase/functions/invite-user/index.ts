@@ -39,23 +39,36 @@ Deno.serve(async (request) => {
   if (identityError || !identity.user)
     return reply({ error: 'Invalid session' }, 401);
 
+  const { data: callerProfile } = await admin
+    .from('profiles')
+    .select('id')
+    .eq('auth_user_id', identity.user.id)
+    .maybeSingle();
+  if (!callerProfile)
+    return reply({ error: 'Active profile not found' }, 403);
+
   const [{ data: owner }, { data: adminRole }] = await Promise.all([
     admin
       .from('workspace_owners')
       .select('profile_id')
-      .eq('profile_id', identity.user.id)
+      .eq('profile_id', callerProfile.id)
       .maybeSingle(),
     admin
       .from('user_roles')
       .select('profile_id')
-      .eq('profile_id', identity.user.id)
+      .eq('profile_id', callerProfile.id)
       .eq('role', 'admin')
       .maybeSingle(),
   ]);
   if (!owner && !adminRole)
     return reply({ error: 'Only an Owner or Admin can invite people' }, 403);
 
-  let payload: { email?: string; fullName?: string; roles?: string[] };
+  let payload: {
+    profileId?: string;
+    email?: string;
+    fullName?: string;
+    roles?: string[];
+  };
   try {
     payload = await request.json();
   } catch {
@@ -73,6 +86,25 @@ Deno.serve(async (request) => {
   if (owner && !roles.length)
     return reply({ error: 'Choose at least one responsibility' }, 400);
 
+  let targetProfileId = payload.profileId;
+  if (targetProfileId) {
+    const { data: target } = await admin
+      .from('profiles')
+      .select('id,auth_user_id')
+      .eq('id', targetProfileId)
+      .maybeSingle();
+    if (!target)
+      return reply({ error: 'Team member not found' }, 404);
+    if (target.auth_user_id)
+      return reply({ error: 'This person already has a login' }, 409);
+    const { error: prepareError } = await admin
+      .from('profiles')
+      .update({ email, full_name: fullName })
+      .eq('id', targetProfileId);
+    if (prepareError)
+      return reply({ error: 'Could not prepare the team profile' }, 500);
+  }
+
   const origin = request.headers.get('origin');
   const redirectTo =
     origin && /^https?:\/\//.test(origin)
@@ -89,17 +121,29 @@ Deno.serve(async (request) => {
       400,
     );
 
+  if (!targetProfileId) {
+    const { data: linkedProfile } = await admin
+      .from('profiles')
+      .select('id')
+      .eq('auth_user_id', invited.user.id)
+      .maybeSingle();
+    targetProfileId = linkedProfile?.id;
+  }
+  if (!targetProfileId)
+    return reply({ error: 'Invitation created, but profile linking failed' }, 500);
+
   if (owner) {
-    const { error: rolesError } = await admin
-      .from('user_roles')
-      .insert(roles.map((role) => ({ profile_id: invited.user!.id, role })));
+    await admin.from('user_roles').delete().eq('profile_id', targetProfileId);
+    const { error: rolesError } = await admin.from('user_roles').insert(
+      roles.map((role) => ({ profile_id: targetProfileId!, role })),
+    );
     if (rolesError)
       return reply({ error: 'Invitation created, but role setup failed' }, 500);
   }
   const { error: profileError } = await admin
     .from('profiles')
     .update({ full_name: fullName, is_active: Boolean(owner) })
-    .eq('id', invited.user.id);
+    .eq('id', targetProfileId);
   if (profileError)
     return reply({ error: 'Invitation created, but access setup failed' }, 500);
   return reply({

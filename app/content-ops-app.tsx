@@ -362,6 +362,8 @@ export default function ContentOpsApp({
   }, [client, reloadLive]);
 
   const isOwner = currentUser.roles.includes('Owner');
+  const isPrimaryAccessOwner =
+    isOwner && currentUser.email.toLowerCase() === 'aditi@buildablelabs.com';
   const isRolePreview = !demoMode && isOwner && Boolean(previewRole);
   const rolePerson = demoMode
     ? (people.find((person) => person.id === ROLE_PERSON[currentRole]) ??
@@ -388,7 +390,8 @@ export default function ContentOpsApp({
     () => getMyActions(visibleItems, effectiveRoles, rolePerson),
     [visibleItems, effectiveRoles, rolePerson],
   );
-  const canManageAccess = effectiveRoles.includes('Owner');
+  const canManageAccess =
+    isPrimaryAccessOwner && effectiveRoles.includes('Owner');
   const canManageRaci = effectiveRoles.includes('Owner');
   const canInvitePeople = hasAnyRole(effectiveRoles, ['Owner', 'Admin']);
   const canCreate = hasAnyRole(effectiveRoles, [
@@ -609,6 +612,36 @@ export default function ContentOpsApp({
       });
       if (error) throw error;
     }, `${person.name}'s access was updated.`);
+  };
+
+  const toggleAkhilOwner = async (person: Person, enabled: boolean) => {
+    const isAkhil =
+      person.email.toLowerCase() === 'akhil@buildablelabs.com';
+    if (!isAkhil || !isPrimaryAccessOwner)
+      return showNotice('Only Aditi can change Akhil Owner access.');
+    if (demoMode) {
+      setPeople((all) =>
+        all.map((entry) =>
+          entry.id === person.id
+            ? {
+                ...entry,
+                roles: enabled
+                  ? ['Owner', ...entry.roles.filter((role) => role !== 'Owner')]
+                  : entry.roles.filter((role) => role !== 'Owner'),
+              }
+            : entry,
+        ),
+      );
+      return showNotice(
+        `Akhil's Owner access was ${enabled ? 'enabled' : 'removed'} in the demo.`,
+      );
+    }
+    return mutateLive(async (supabase) => {
+      const { error } = await supabase.rpc('set_akhil_owner', {
+        p_enabled: enabled,
+      });
+      if (error) throw error;
+    }, `Akhil's Owner access was ${enabled ? 'enabled' : 'removed'}.`);
   };
 
   const inviteUser = async (draft: InviteDraft) => {
@@ -1636,10 +1669,12 @@ export default function ContentOpsApp({
             <People
               people={people}
               demoMode={demoMode}
+              busy={busy}
               canManageAccess={canManageAccess}
               onInvite={() => setInviteTarget('new')}
               onInvitePerson={(person) => setInviteTarget(person)}
               onManage={manageAccess}
+              onToggleAkhilOwner={toggleAkhilOwner}
             />
           )}
           {view === 'settings' && (
@@ -4450,17 +4485,21 @@ function Stakeholder({ items }: { items: ContentItem[] }) {
 function People({
   people,
   demoMode,
+  busy,
   canManageAccess,
   onInvite,
   onInvitePerson,
   onManage,
+  onToggleAkhilOwner,
 }: {
   people: Person[];
   demoMode: boolean;
+  busy: boolean;
   canManageAccess: boolean;
   onInvite: () => void;
   onInvitePerson: (person: Person) => void;
   onManage: (person: Person, active: boolean, roles: AppRole[]) => void;
+  onToggleAkhilOwner: (person: Person, enabled: boolean) => void;
 }) {
   const [selectedPersonId, setSelectedPersonId] = useState<string>();
   const selectedPerson = people.find(
@@ -4474,7 +4513,7 @@ function People({
         action={
           <div className="flex items-center gap-2">
             {demoMode && <Badge variant="outline">Demo data</Badge>}
-            <HelpTip text="Aditi is the protected Owner. Admins may invite teammates, while only the Owner can activate accounts or change roles." />
+            <HelpTip text="Aditi is the protected primary Owner. Only she can activate accounts, change roles, or grant optional Owner access to Akhil." />
             <Button onClick={onInvite}>
               <Plus /> Invite teammate
             </Button>
@@ -4582,9 +4621,11 @@ function People({
             <div className="p-4 pt-0">
               <AccessCard
                 person={selectedPerson}
+                busy={busy}
                 canManage={canManageAccess}
                 onInvite={() => onInvitePerson(selectedPerson)}
                 onManage={onManage}
+                onToggleAkhilOwner={onToggleAkhilOwner}
               />
             </div>
           )}
@@ -4596,16 +4637,22 @@ function People({
 
 function AccessCard({
   person,
+  busy,
   canManage,
   onInvite,
   onManage,
+  onToggleAkhilOwner,
 }: {
   person: Person;
+  busy: boolean;
   canManage: boolean;
   onInvite: () => void;
   onManage: (person: Person, active: boolean, roles: AppRole[]) => void;
+  onToggleAkhilOwner: (person: Person, enabled: boolean) => void;
 }) {
   const isOwner = person.roles.includes('Owner');
+  const isAkhil =
+    person.email.toLowerCase() === 'akhil@buildablelabs.com';
   const [active, setActive] = useState(person.isActive !== false);
   const [roles, setRoles] = useState<AppRole[]>(
     person.roles.filter((role) => role !== 'Owner'),
@@ -4637,10 +4684,33 @@ function AccessCard({
         )}
       </CardHeader>
       <CardContent>
+        {canManage && isAkhil && (
+          <div className="mb-4 flex items-center justify-between rounded-xl border border-[#dfa126]/45 bg-[var(--warning-subtle)] p-3">
+            <div>
+              <p className="text-sm font-semibold text-[var(--warning-foreground)]">
+                Owner access
+              </p>
+              <p className="mt-0.5 text-xs text-muted-foreground">
+                Only you can grant or remove this access for Akhil.
+              </p>
+            </div>
+            <Checkbox
+              aria-label="Give Akhil Owner access"
+              checked={isOwner}
+              disabled={busy || !person.hasLogin || person.isActive === false}
+              onCheckedChange={(checked) =>
+                onToggleAkhilOwner(person, Boolean(checked))
+              }
+            />
+          </div>
+        )}
         {isOwner ? (
           <p className="rounded-xl bg-[var(--warning-subtle)] p-3 text-sm text-[var(--warning-foreground)]">
-            Protected full-access ID. Owner access is configured securely during
-            backend setup and cannot be changed here.
+            {isAkhil && canManage
+              ? 'Akhil currently has Owner access. Unchecking the option above removes only Owner access; his Admin role remains.'
+              : isAkhil
+                ? 'Owner access is active. Only Aditi can remove it.'
+              : 'Protected full-access ID. Aditi’s primary Owner access cannot be changed here.'}
           </p>
         ) : canManage ? (
           <>

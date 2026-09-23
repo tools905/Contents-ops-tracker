@@ -13,12 +13,12 @@ import { PIPELINE } from './content-types';
 export const demoPeople: Person[] = [
   {
     id: 'p1',
-    name: 'Workspace Owner 1',
-    email: 'owner.one@aafmindia.test',
-    initials: 'O1',
+    name: 'Aditi Chourasia',
+    email: 'aditi@buildablelabs.com',
+    initials: 'AC',
     roles: ['Owner'],
     isActive: true,
-    responsibility: 'Protected full-access ID',
+    responsibility: 'Protected primary Owner; access and role governance',
   },
   {
     id: 'p2',
@@ -95,12 +95,13 @@ export const demoPeople: Person[] = [
   },
   {
     id: 'p10',
-    name: 'Workspace Owner 2',
-    email: 'owner.two@aafmindia.test',
-    initials: 'O2',
-    roles: ['Owner'],
+    name: 'Akhil Alampally',
+    email: 'akhil@buildablelabs.com',
+    initials: 'AA',
+    roles: ['Admin'],
     isActive: true,
-    responsibility: 'Protected full-access ID',
+    hasLogin: true,
+    responsibility: 'Optional secondary Owner; enabled only by Aditi',
   },
 ];
 

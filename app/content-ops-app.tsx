@@ -1533,32 +1533,44 @@ export default function ContentOpsApp({
                 </NativeSelect>
               </div>
             )}
-            <div className="relative hidden sm:block">
-              {theme === 'dark' ? (
-                <Moon className="pointer-events-none absolute left-2.5 top-1/2 z-10 size-4 -translate-y-1/2 text-muted-foreground" />
-              ) : theme === 'light' ? (
-                <Sun className="pointer-events-none absolute left-2.5 top-1/2 z-10 size-4 -translate-y-1/2 text-muted-foreground" />
-              ) : (
-                <Monitor className="pointer-events-none absolute left-2.5 top-1/2 z-10 size-4 -translate-y-1/2 text-muted-foreground" />
-              )}
-              <NativeSelect
-                aria-label="Theme"
-                value={theme}
-                onChange={(event) =>
-                  setTheme(event.target.value as 'light' | 'dark' | 'system')
-                }
-                className="w-[152px] bg-card [&_select]:pl-9"
+            <div
+              role="group"
+              aria-label="Theme"
+              className="hidden h-9 items-center gap-0.5 rounded-lg border border-border bg-card p-1 shadow-sm sm:flex"
+            >
+              <Button
+                type="button"
+                variant={theme === 'system' ? 'default' : 'ghost'}
+                size="icon-sm"
+                aria-label="Use system theme"
+                aria-pressed={theme === 'system'}
+                title="System theme"
+                onClick={() => setTheme('system')}
               >
-                <NativeSelectOption value="system">
-                  System theme
-                </NativeSelectOption>
-                <NativeSelectOption value="light">
-                  Light theme
-                </NativeSelectOption>
-                <NativeSelectOption value="dark">
-                  Dark theme
-                </NativeSelectOption>
-              </NativeSelect>
+                <Monitor />
+              </Button>
+              <Button
+                type="button"
+                variant={theme === 'light' ? 'default' : 'ghost'}
+                size="icon-sm"
+                aria-label="Use light theme"
+                aria-pressed={theme === 'light'}
+                title="Light theme"
+                onClick={() => setTheme('light')}
+              >
+                <Sun />
+              </Button>
+              <Button
+                type="button"
+                variant={theme === 'dark' ? 'default' : 'ghost'}
+                size="icon-sm"
+                aria-label="Use dark theme"
+                aria-pressed={theme === 'dark'}
+                title="Dark theme"
+                onClick={() => setTheme('dark')}
+              >
+                <Moon />
+              </Button>
             </div>
             <Button
               variant="outline"
@@ -3181,9 +3193,9 @@ function ContentCalendar({
         eyebrow="PLAN"
         title="Content calendar"
         action={
-          <div className="flex flex-wrap justify-end gap-2">
+          <div className="flex flex-wrap items-center justify-end gap-2">
             {canImport && (
-              <label className="inline-flex h-9 cursor-pointer items-center gap-2 rounded-md border border-border bg-card px-3 text-sm font-medium text-card-foreground shadow-sm hover:bg-muted">
+              <label className="inline-flex h-10 cursor-pointer items-center gap-2 rounded-xl border border-border bg-card px-4 text-sm font-medium text-card-foreground shadow-sm transition-colors hover:bg-muted">
                 <FileUp className="size-4" /> Import calendar
                 <input
                   type="file"
@@ -3197,10 +3209,17 @@ function ContentCalendar({
                 />
               </label>
             )}
-            <Button variant="outline" size="sm" onClick={onExport}>
+            <Button
+              variant="outline"
+              size="lg"
+              className="h-10 rounded-xl px-4"
+              onClick={onExport}
+            >
               <FileDown /> Export Excel
             </Button>
-            <HelpTip text={`Admins can upload Excel up to ${EXCEL_IMPORT_LIMIT_BYTES / 1024 / 1024} MB or a text-based PDF up to ${PDF_IMPORT_LIMIT_BYTES / 1024 / 1024} MB, with at most ${CALENDAR_IMPORT_ROW_LIMIT.toLocaleString('en-IN')} dated rows. Matching rows are skipped safely.`} />
+            <div className="grid size-10 place-items-center">
+              <HelpTip text={`Admins can upload Excel up to ${EXCEL_IMPORT_LIMIT_BYTES / 1024 / 1024} MB or a text-based PDF up to ${PDF_IMPORT_LIMIT_BYTES / 1024 / 1024} MB, with at most ${CALENDAR_IMPORT_ROW_LIMIT.toLocaleString('en-IN')} dated rows. Matching rows are skipped safely.`} />
+            </div>
           </div>
         }
       />

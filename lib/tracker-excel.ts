@@ -12,6 +12,10 @@ import type { Sheet } from 'write-excel-file/browser';
 type ExcelValue = string | number | boolean | Date | null;
 type InputRow = ExcelValue[];
 
+export const EXCEL_IMPORT_LIMIT_BYTES = 10 * 1024 * 1024;
+export const PDF_IMPORT_LIMIT_BYTES = 20 * 1024 * 1024;
+export const CALENDAR_IMPORT_ROW_LIMIT = 1000;
+
 export type CalendarImportRow = {
   importSource: string;
   sourceKey: string;
@@ -88,15 +92,74 @@ function isoAtNoonIndia(date: Date) {
   return new Date(`${yyyy}-${mm}-${dd}T12:00:00+05:30`).toISOString();
 }
 
+function importWindowStart(today: Date) {
+  const cutoff = new Date(today);
+  cutoff.setHours(0, 0, 0, 0);
+  cutoff.setDate(cutoff.getDate() - 30);
+  return cutoff;
+}
+
+function ensureImportRowLimit(rows: CalendarImportRow[]) {
+  if (rows.length > CALENDAR_IMPORT_ROW_LIMIT)
+    throw new Error(
+      `This file contains more than ${CALENDAR_IMPORT_ROW_LIMIT.toLocaleString('en-IN')} dated items. Split it into smaller monthly files and try again.`,
+    );
+  return rows.sort(
+    (a, b) => a.dueAt.localeCompare(b.dueAt) || a.title.localeCompare(b.title),
+  );
+}
+
+function buildImportRow(input: {
+  fileName: string;
+  sourceKeyPrefix: string;
+  sourceLabel: string;
+  title: string;
+  platform: string;
+  rawType?: string;
+  date: Date;
+  contentStatus?: string;
+  postingStatus?: string;
+}): CalendarImportRow {
+  const contentType = contentTypeFor(input.platform, input.rawType ?? '');
+  const posted = /posted|published|live/i.test(input.postingStatus ?? '');
+  const readyToPublish = /scheduled|ready/i.test(
+    `${input.postingStatus ?? ''} ${input.contentStatus ?? ''}`,
+  );
+  const dateKey = input.date.toISOString().slice(0, 10);
+  return {
+    importSource: input.fileName,
+    sourceKey: [
+      input.sourceKeyPrefix,
+      dateKey,
+      normalized(input.title),
+    ].join('::'),
+    sourceLabel: input.sourceLabel,
+    title: input.title,
+    platform: input.platform,
+    contentType,
+    pillar: pillarFor(input.title),
+    dueAt: isoAtNoonIndia(input.date),
+    workflowRoute: ['Reel', 'Short', 'Video'].includes(contentType)
+      ? 'Full production'
+      : 'Design route',
+    initialStage: posted ? 'Post-Upload' : readyToPublish ? 'Upload' : 'Idea',
+    initialStep: posted
+      ? 'Publish confirmation'
+      : readyToPublish
+        ? 'Platform scheduling'
+        : 'Topic research',
+    contentStatus: input.contentStatus || undefined,
+    postingStatus: input.postingStatus || undefined,
+  };
+}
+
 export async function parseMasterCalendar(
   file: File,
   today = new Date(),
 ): Promise<CalendarImportRow[]> {
   const { default: readExcelFile } = await import('read-excel-file/browser');
   const sheets = await readExcelFile(file);
-  const cutoff = new Date(today);
-  cutoff.setHours(0, 0, 0, 0);
-  cutoff.setDate(cutoff.getDate() - 30);
+  const cutoff = importWindowStart(today);
   const imported: CalendarImportRow[] = [];
 
   for (const sheet of sheets) {
@@ -121,48 +184,269 @@ export async function parseMasterCalendar(
       const title = String(row[topicIndex] ?? '').trim();
       const date = dateValue(row[dateIndex]);
       if (!title || !date || date < cutoff) continue;
-      const contentType = contentTypeFor(
-        platform,
-        String(row[typeIndex] ?? ''),
-      );
       const contentStatus = String(row[contentStatusIndex] ?? '').trim();
       const postingStatus = String(row[postingStatusIndex] ?? '').trim();
-      const posted = /posted|published|live/i.test(postingStatus);
-      const readyToPublish = /scheduled|ready/i.test(
-        `${postingStatus} ${contentStatus}`,
+      imported.push(
+        buildImportRow({
+          fileName: file.name,
+          sourceKeyPrefix: sheet.sheet,
+          sourceLabel: `${sheet.sheet} master calendar`,
+          title,
+          platform,
+          rawType: String(row[typeIndex] ?? ''),
+          date,
+          contentStatus,
+          postingStatus,
+        }),
       );
-      const dateKey = date.toISOString().slice(0, 10);
-      imported.push({
-        importSource: file.name,
-        sourceKey: [sheet.sheet, dateKey, normalized(title)].join('::'),
-        sourceLabel: `${sheet.sheet} master calendar`,
-        title,
-        platform,
-        contentType,
-        pillar: pillarFor(title),
-        dueAt: isoAtNoonIndia(date),
-        workflowRoute: ['Reel', 'Short', 'Video'].includes(contentType)
-          ? 'Full production'
-          : 'Design route',
-        initialStage: posted
-          ? 'Post-Upload'
-          : readyToPublish
-            ? 'Upload'
-            : 'Idea',
-        initialStep: posted
-          ? 'Publish confirmation'
-          : readyToPublish
-            ? 'Platform scheduling'
-            : 'Topic research',
-        contentStatus: contentStatus || undefined,
-        postingStatus: postingStatus || undefined,
-      });
     }
   }
 
-  return imported.sort(
-    (a, b) => a.dueAt.localeCompare(b.dueAt) || a.title.localeCompare(b.title),
-  );
+  return ensureImportRowLimit(imported);
+}
+
+type PdfToken = { text: string; x: number; y: number };
+type PdfLine = { tokens: PdfToken[]; text: string };
+
+const PDF_DATE_PATTERNS = [
+  /\b\d{4}[-/.]\d{1,2}[-/.]\d{1,2}\b/,
+  /\b\d{1,2}[-/.]\d{1,2}[-/.]\d{2,4}\b/,
+  /\b\d{1,2}(?:st|nd|rd|th)?\s+(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\s+\d{2,4}\b/i,
+  /\b(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\s+\d{1,2}(?:st|nd|rd|th)?(?:,)?\s+\d{2,4}\b/i,
+];
+
+function parsedPdfDate(value: string) {
+  const cleaned = value
+    .replace(/(\d)(st|nd|rd|th)\b/gi, '$1')
+    .replace(/[/.]/g, '-')
+    .trim();
+  const iso = cleaned.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/);
+  const indian = cleaned.match(/^(\d{1,2})-(\d{1,2})-(\d{2,4})$/);
+  if (iso) {
+    const [, year, month, day] = iso;
+    return new Date(
+      Date.UTC(Number(year), Number(month) - 1, Number(day), 12),
+    );
+  }
+  if (indian) {
+    const [, day, month, shortYear] = indian;
+    const year = Number(shortYear) + (shortYear.length === 2 ? 2000 : 0);
+    return new Date(Date.UTC(year, Number(month) - 1, Number(day), 12));
+  }
+  const parsed = new Date(cleaned);
+  return Number.isNaN(parsed.valueOf()) ? undefined : parsed;
+}
+
+function findPdfDate(text: string) {
+  for (const pattern of PDF_DATE_PATTERNS) {
+    const match = text.match(pattern)?.[0];
+    const date = match ? parsedPdfDate(match) : undefined;
+    if (match && date) return { match, date };
+  }
+  return undefined;
+}
+
+function pdfLines(tokens: PdfToken[]) {
+  const lines: PdfToken[][] = [];
+  for (const token of [...tokens].sort((a, b) => b.y - a.y || a.x - b.x)) {
+    const line = lines.find(
+      (candidate) => Math.abs((candidate[0]?.y ?? token.y) - token.y) <= 3,
+    );
+    if (line) line.push(token);
+    else lines.push([token]);
+  }
+  return lines
+    .map((line) => {
+      const sorted = line.sort((a, b) => a.x - b.x);
+      return {
+        tokens: sorted,
+        text: sorted
+          .map((token) => token.text)
+          .join(' ')
+          .replace(/\s+/g, ' ')
+          .trim(),
+      };
+    })
+    .filter((line) => line.text);
+}
+
+function platformFromText(value: string) {
+  const text = value.toLowerCase();
+  if (/\blinked\s*in\b/.test(text)) return 'LinkedIn';
+  if (/\binsta(?:gram)?\b/.test(text)) return 'Instagram';
+  if (/\bfacebook\b/.test(text)) return 'Facebook';
+  if (/\byoutube\b/.test(text)) return 'YouTube';
+  if (/\b(?:twitter|x)\b/.test(text)) return 'X';
+  return undefined;
+}
+
+function valueBetweenColumns(
+  line: PdfLine,
+  start?: number,
+  end?: number,
+) {
+  if (start === undefined) return '';
+  return line.tokens
+    .filter((token) => token.x >= start - 4 && (end === undefined || token.x < end))
+    .map((token) => token.text)
+    .join(' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function cleanPdfTitle(value: string, dateText: string) {
+  return value
+    .replace(dateText, ' ')
+    .replace(
+      /\b(?:reel|short|video|carousel|post|posted|published|live|scheduled|ready|draft|pending|instagram|linkedin|facebook|youtube|twitter|multi-platform)\b/gi,
+      ' ',
+    )
+    .replace(/\s+/g, ' ')
+    .replace(/^[|:;,\-\s]+|[|:;,\-\s]+$/g, '')
+    .trim();
+}
+
+export async function parseCalendarPdf(
+  file: File,
+  today = new Date(),
+): Promise<CalendarImportRow[]> {
+  const { getDocument, GlobalWorkerOptions } =
+    typeof window === 'undefined'
+      ? await import('pdfjs-dist/legacy/build/pdf.mjs')
+      : await import('pdfjs-dist');
+  if (typeof window !== 'undefined') {
+    const workerModule = await import(
+      'pdfjs-dist/build/pdf.worker.min.mjs?url'
+    );
+    GlobalWorkerOptions.workerSrc = workerModule.default;
+  }
+  const document = await getDocument({
+    data: new Uint8Array(await file.arrayBuffer()),
+  }).promise;
+  const cutoff = importWindowStart(today);
+  const imported: CalendarImportRow[] = [];
+
+  for (let pageNumber = 1; pageNumber <= document.numPages; pageNumber += 1) {
+    const page = await document.getPage(pageNumber);
+    const content = await page.getTextContent();
+    const lines = pdfLines(
+      content.items
+        .filter(
+          (
+            item,
+          ): item is (typeof content.items)[number] & {
+            str: string;
+            transform: number[];
+          } =>
+            'str' in item &&
+            'transform' in item &&
+            Boolean(item.str.trim()),
+        )
+        .map((item) => ({
+          text: item.str.trim(),
+          x: Number(item.transform[4] ?? 0),
+          y: Number(item.transform[5] ?? 0),
+        })),
+    );
+    const pageText = lines.map((line) => line.text).join(' ');
+    let platform = platformFromText(pageText) ?? 'Multi-platform';
+    let columns: Record<string, number> | undefined;
+
+    for (const line of lines) {
+      platform = platformFromText(line.text) ?? platform;
+      const tokenNames = line.tokens.map((token) => normalized(token.text));
+      if (tokenNames.includes('date') && tokenNames.includes('topic')) {
+        columns = Object.fromEntries(
+          line.tokens
+            .map((token) => [normalized(token.text), token.x] as const)
+            .filter(([name]) =>
+              [
+                'date',
+                'topic',
+                'type of post',
+                'type',
+                'content status',
+                'posting status',
+              ].includes(name),
+            ),
+        );
+        continue;
+      }
+      const found = findPdfDate(line.text);
+      if (!found || found.date < cutoff) continue;
+
+      const orderedColumns = columns
+        ? Object.entries(columns).sort(([, a], [, b]) => a - b)
+        : [];
+      const columnEnd = (name: string) => {
+        const index = orderedColumns.findIndex(([entry]) => entry === name);
+        return index >= 0 ? orderedColumns[index + 1]?.[1] : undefined;
+      };
+      const topic = columns?.topic
+        ? valueBetweenColumns(line, columns.topic, columnEnd('topic'))
+        : '';
+      const rawType = columns?.['type of post']
+        ? valueBetweenColumns(
+            line,
+            columns['type of post'],
+            columnEnd('type of post'),
+          )
+        : columns?.type
+          ? valueBetweenColumns(line, columns.type, columnEnd('type'))
+          : line.text.match(/\b(reel|short|video|carousel|post)\b/i)?.[0] ?? '';
+      const contentStatus = columns?.['content status']
+        ? valueBetweenColumns(
+            line,
+            columns['content status'],
+            columnEnd('content status'),
+          )
+        : '';
+      const postingStatus = columns?.['posting status']
+        ? valueBetweenColumns(
+            line,
+            columns['posting status'],
+            columnEnd('posting status'),
+          )
+        : line.text.match(/\b(posted|published|live|scheduled|ready|draft|pending)\b/i)?.[0] ??
+          '';
+      const title = cleanPdfTitle(topic || line.text, found.match);
+      if (!title || normalized(title) === 'date topic') continue;
+      imported.push(
+        buildImportRow({
+          fileName: file.name,
+          sourceKeyPrefix: `pdf-page-${pageNumber}`,
+          sourceLabel: `${platform} PDF calendar`,
+          title,
+          platform,
+          rawType,
+          date: found.date,
+          contentStatus,
+          postingStatus,
+        }),
+      );
+    }
+  }
+
+  if (!imported.length && document.numPages)
+    throw new Error(
+      'No dated calendar rows were found. Use a text-based PDF exported from the calendar; scanned image PDFs cannot be imported.',
+    );
+  return ensureImportRowLimit(imported);
+}
+
+export async function parseCalendarFile(file: File, today = new Date()) {
+  const extension = file.name.split('.').pop()?.toLowerCase();
+  if (extension === 'xlsx') {
+    if (file.size > EXCEL_IMPORT_LIMIT_BYTES)
+      throw new Error('Excel files can be up to 10 MB.');
+    return parseMasterCalendar(file, today);
+  }
+  if (extension === 'pdf') {
+    if (file.size > PDF_IMPORT_LIMIT_BYTES)
+      throw new Error('PDF files can be up to 20 MB.');
+    return parseCalendarPdf(file, today);
+  }
+  throw new Error('Choose an Excel (.xlsx) or text-based PDF (.pdf) file.');
 }
 
 const headerStyle = {

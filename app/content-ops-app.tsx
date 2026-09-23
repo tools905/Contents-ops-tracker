@@ -45,7 +45,6 @@ import {
   Sparkles,
   Sun,
   UploadCloud,
-  UserRound,
   Users2,
   X,
   Zap,
@@ -153,8 +152,11 @@ import {
 import { makeSupabaseClient, type SupabaseConfig } from '@/lib/supabase-client';
 import { loadLiveSnapshot } from '@/lib/supabase-data';
 import {
+  CALENDAR_IMPORT_ROW_LIMIT,
+  EXCEL_IMPORT_LIMIT_BYTES,
+  PDF_IMPORT_LIMIT_BYTES,
   exportTrackerWorkbook,
-  parseMasterCalendar,
+  parseCalendarFile,
   type CalendarImportRow,
 } from '@/lib/tracker-excel';
 
@@ -248,6 +250,7 @@ export default function ContentOpsApp({
   const [raciDefaults, setRaciDefaults] =
     useState<Record<Stage, RaciAssignment>>(defaultRaci);
   const [importBatches, setImportBatches] = useState<CalendarImportBatch[]>([]);
+  const [defaultReminderHours, setDefaultReminderHours] = useState(24);
   const [currentUser, setCurrentUser] = useState<Person>(demoPeople[0]);
   const [currentRole, setCurrentRole] = useState<AppRole>('Owner');
   const [previewRole, setPreviewRole] = useState<Exclude<
@@ -267,6 +270,7 @@ export default function ContentOpsApp({
   const [theme, setTheme] = useState<'light' | 'dark' | 'system'>('system');
   const [overrideItem, setOverrideItem] = useState<ContentItem>();
   const [moveIntent, setMoveIntent] = useState<MoveIntent>();
+  const [notificationsOpen, setNotificationsOpen] = useState(false);
   const [notice, setNotice] = useState('');
   const [busy, setBusy] = useState(false);
 
@@ -280,6 +284,7 @@ export default function ContentOpsApp({
       setCadenceRuns(snapshot.cadenceRuns);
       setRaciDefaults(snapshot.raciDefaults);
       setImportBatches(snapshot.importBatches);
+      setDefaultReminderHours(snapshot.defaultReminderHours);
       setCurrentUser(snapshot.currentUser);
       setActiveProfile(snapshot.currentUserActive);
       if (snapshot.currentUser.roles.length)
@@ -384,6 +389,7 @@ export default function ContentOpsApp({
     [visibleItems, effectiveRoles, rolePerson],
   );
   const canManageAccess = effectiveRoles.includes('Owner');
+  const canManageRaci = effectiveRoles.includes('Owner');
   const canInvitePeople = hasAnyRole(effectiveRoles, ['Owner', 'Admin']);
   const canCreate = hasAnyRole(effectiveRoles, [
     'Owner',
@@ -526,11 +532,24 @@ export default function ContentOpsApp({
 
   const approve = (item: ContentItem) => {
     if (
+      effectiveRoles.includes('Owner') &&
+      !isAssigned(item, rolePerson, 'accountable')
+    ) {
+      setOverrideItem(item);
+      return;
+    }
+    if (
       ['Script', 'Production'].includes(item.stage) &&
       item.secondLens !== 'Approved'
-    )
-      setOverrideItem(item);
-    else void advance(item);
+    ) {
+      if (effectiveRoles.includes('Owner')) setOverrideItem(item);
+      else
+        showNotice(
+          'A recorded second-lens review is required before this stage can advance.',
+        );
+      return;
+    }
+    void advance(item);
   };
 
   const requestMove = (item: ContentItem, toStage: Stage) => {
@@ -897,7 +916,7 @@ export default function ContentOpsApp({
         dueAt: draft.dueAt
           ? new Date(`${draft.dueAt}:00+05:30`).toISOString()
           : undefined,
-        reminderHours: 24,
+        reminderHours: defaultReminderHours,
         lifecycle: 'Active',
         responsible: assignment.responsible,
         accountable: assignment.accountable,
@@ -920,7 +939,7 @@ export default function ContentOpsApp({
 
   const prepareCalendarImport = async (file: File) => {
     try {
-      const rows = await parseMasterCalendar(file);
+      const rows = await parseCalendarFile(file);
       if (!rows.length)
         return showNotice(
           'No dated content was found in the active/future plus prior 30-day window.',
@@ -930,7 +949,7 @@ export default function ContentOpsApp({
       showNotice(
         error instanceof Error
           ? error.message
-          : 'The Excel file could not be read.',
+          : 'The calendar file could not be read.',
       );
     }
   };
@@ -976,7 +995,7 @@ export default function ContentOpsApp({
         stage: row.initialStage,
         status: 'In progress',
         dueAt: row.dueAt,
-        reminderHours: 24,
+        reminderHours: defaultReminderHours,
         lifecycle: 'Active',
         ...raciFor({ raci } as ContentItem, row.initialStage),
         raci,
@@ -1029,6 +1048,23 @@ export default function ContentOpsApp({
         error instanceof Error ? error.message : 'Excel export failed.',
       );
     }
+  };
+
+  const saveDefaultReminder = async (hours: number) => {
+    if (!Number.isInteger(hours) || hours < 0 || hours > 720)
+      return showNotice('Choose a whole number between 0 and 720 hours.');
+    if (!demoMode) {
+      const saved = await mutateLive(async (supabase) => {
+        const { error } = await supabase.rpc('set_default_reminder_hours', {
+          p_hours: hours,
+        });
+        if (error) throw error;
+      }, `Default reminder saved at ${hours} hours.`);
+      if (saved) setDefaultReminderHours(hours);
+      return;
+    }
+    setDefaultReminderHours(hours);
+    showNotice(`Default reminder saved at ${hours} hours in the demo.`);
   };
 
   const addRequest = async (
@@ -1395,14 +1431,7 @@ export default function ContentOpsApp({
         <header className="sticky top-0 z-20 flex min-h-16 items-center justify-between gap-3 border-b border-border bg-background/92 px-4 py-2 backdrop-blur-md sm:px-7 lg:px-10">
           <div className="flex min-w-0 items-center gap-3">
             <SidebarTrigger className="md:hidden" />
-            <Image
-              src="/aafm-india-logo.png"
-              alt="AAFM India"
-              width={1684}
-              height={594}
-              className="hidden h-8 w-auto sm:block"
-            />
-            <div className="hidden border-l border-border pl-3 lg:block">
+            <div className="min-w-0">
               <p className="text-xs font-semibold uppercase tracking-[0.14em] text-[var(--warning-foreground)]">
                 Content operations
               </p>
@@ -1448,7 +1477,7 @@ export default function ContentOpsApp({
                     );
                     setView('today');
                   }}
-                  className="max-w-[210px] bg-card pl-8"
+                  className="w-[224px] bg-card [&_select]:pl-9"
                 >
                   <NativeSelectOption value="Owner">
                     Owner view
@@ -1485,11 +1514,17 @@ export default function ContentOpsApp({
                 onChange={(event) =>
                   setTheme(event.target.value as 'light' | 'dark' | 'system')
                 }
-                className="w-[116px] bg-card pl-8"
+                className="w-[152px] bg-card [&_select]:pl-9"
               >
-                <NativeSelectOption value="system">System</NativeSelectOption>
-                <NativeSelectOption value="light">Light</NativeSelectOption>
-                <NativeSelectOption value="dark">Dark</NativeSelectOption>
+                <NativeSelectOption value="system">
+                  System theme
+                </NativeSelectOption>
+                <NativeSelectOption value="light">
+                  Light theme
+                </NativeSelectOption>
+                <NativeSelectOption value="dark">
+                  Dark theme
+                </NativeSelectOption>
               </NativeSelect>
             </div>
             <Button
@@ -1519,13 +1554,7 @@ export default function ContentOpsApp({
               variant="outline"
               size="icon"
               aria-label="Notifications"
-              onClick={() =>
-                showNotice(
-                  myActions.length
-                    ? `${myActions.length} action${myActions.length === 1 ? '' : 's'} need your attention.`
-                    : 'You are all caught up.',
-                )
-              }
+              onClick={() => setNotificationsOpen(true)}
             >
               <Bell />
             </Button>
@@ -1618,7 +1647,10 @@ export default function ContentOpsApp({
               demoMode={demoMode}
               raci={raciDefaults}
               canManage={canManageOperations}
+              canManageRaci={canManageRaci}
               onEditRaci={setRaciStageIntent}
+              defaultReminderHours={defaultReminderHours}
+              onSaveReminder={saveDefaultReminder}
               cadences={visibleCadences}
               cadenceRuns={cadenceRuns}
               currentPerson={rolePerson}
@@ -1630,6 +1662,15 @@ export default function ContentOpsApp({
           )}
         </main>
       </SidebarInset>
+      <ActionCenter
+        open={notificationsOpen}
+        onOpenChange={setNotificationsOpen}
+        actions={myActions}
+        onOpenItem={(id) => {
+          setNotificationsOpen(false);
+          setSelectedId(id);
+        }}
+      />
       <CreateDialog
         key={people.map((person) => person.id).join(':')}
         open={createOpen}
@@ -1696,17 +1737,6 @@ function hasAnyRole(roles: AppRole[], expected: AppRole[]) {
   return expected.some((role) => roles.includes(role));
 }
 
-function dashboardScope(roles: AppRole[]) {
-  if (hasAnyRole(roles, ['Owner', 'Admin']))
-    return 'You can see the full content portfolio, every approval, and every accountable handoff. Only the Owner can change email access and roles.';
-  if (roles.includes('Monitoring'))
-    return 'You see publishing completion, live links, and post-upload learning notes relevant to your role.';
-  if (roles.includes('Content Approver'))
-    return 'You see content awaiting your review and its complete handoff history.';
-  if (roles.includes('Content Producer'))
-    return 'You see the content assigned to you, its deadlines, approvals, and post-upload closeout.';
-  return 'You have a read-only view of approved portfolio progress.';
-}
 function isAssigned(
   item: ContentItem,
   person: Person,
@@ -1742,8 +1772,19 @@ function canSubmitItem(item: ContentItem, roles: AppRole[], person: Person) {
 }
 function canApproveItem(item: ContentItem, roles: AppRole[], person: Person) {
   return (
-    hasAnyRole(roles, ['Owner', 'Admin']) ||
+    roles.includes('Owner') ||
     isAssigned(item, person, 'accountable')
+  );
+}
+function canSecondLensReview(
+  item: ContentItem,
+  roles: AppRole[],
+  person: Person,
+) {
+  return (
+    hasAnyRole(roles, ['Owner', 'Admin', 'Content Approver']) &&
+    !isAssigned(item, person, 'responsible') &&
+    !isAssigned(item, person, 'accountable')
   );
 }
 function filterForRoles(
@@ -1802,7 +1843,10 @@ function getMyActions(
       });
     if (
       item.status === 'Pending approval' &&
-      isAssigned(item, person, 'accountable')
+      isAssigned(item, person, 'accountable') &&
+      (!['Script', 'Production'].includes(item.stage) ||
+        item.secondLens === 'Approved' ||
+        roles.includes('Owner'))
     )
       actions.push({
         item,
@@ -1813,8 +1857,7 @@ function getMyActions(
     if (
       ['Script', 'Production'].includes(item.stage) &&
       item.secondLens === 'Awaiting review' &&
-      (roles.includes('Content Approver') ||
-        isAssigned(item, person, 'accountable'))
+      canSecondLensReview(item, roles, person)
     )
       actions.push({
         item,
@@ -2095,6 +2138,60 @@ function HelpTip({ text }: { text: string }) {
         </TooltipContent>
       </Tooltip>
     </TooltipProvider>
+  );
+}
+
+function ActionCenter({
+  open,
+  onOpenChange,
+  actions,
+  onOpenItem,
+}: {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  actions: ActionItem[];
+  onOpenItem: (id: string) => void;
+}) {
+  return (
+    <Sheet open={open} onOpenChange={onOpenChange}>
+      <SheetContent
+        side="right"
+        className="w-full overflow-y-auto sm:max-w-md"
+      >
+        <SheetHeader className="border-b border-border pr-12">
+          <SheetTitle>Action centre</SheetTitle>
+          <SheetDescription>
+            Work, approvals and feedback that need your attention.
+          </SheetDescription>
+        </SheetHeader>
+        <div className="space-y-2 px-4 pb-5">
+          {actions.map((action) => (
+            <button
+              key={`${action.kind}-${action.item.id}`}
+              type="button"
+              onClick={() => onOpenItem(action.item.id)}
+              className="flex w-full items-start justify-between gap-3 rounded-xl border border-border bg-card p-3.5 text-left transition hover:border-[#dfa126] hover:bg-muted/50"
+            >
+              <span className="min-w-0">
+                <span className="block truncate font-semibold text-card-foreground">
+                  {action.item.title}
+                </span>
+                <span className="mt-1 block text-sm text-muted-foreground">
+                  {action.label}
+                </span>
+                <span className="mt-1 block text-xs text-muted-foreground">
+                  {action.item.stage} · {dueLabel(action.item)}
+                </span>
+              </span>
+              <ChevronRight className="mt-1 size-4 shrink-0 text-muted-foreground" />
+            </button>
+          ))}
+          {!actions.length && (
+            <EmptyState text="You are all caught up. No action is waiting on this login." />
+          )}
+        </div>
+      </SheetContent>
+    </Sheet>
   );
 }
 
@@ -3005,6 +3102,7 @@ function ContentCalendar({
     const today = localDateKey(new Date());
     return new Date(`${today.slice(0, 7)}-01T12:00:00+05:30`);
   });
+  const [selectedDay, setSelectedDay] = useState<string>();
   const scheduled = [...items]
     .filter((item) => item.lifecycle === 'Active' && item.dueAt)
     .sort((a, b) => (a.dueAt ?? '').localeCompare(b.dueAt ?? ''));
@@ -3012,7 +3110,7 @@ function ContentCalendar({
   const [year, monthNumber] = monthKey.split('-').map(Number);
   const firstDay = new Date(`${monthKey}-01T12:00:00+05:30`);
   const mondayOffset = (firstDay.getUTCDay() + 6) % 7;
-  const daysInMonth = new Date(Date.UTC(year, monthNumber, 0)).getUTCDate();
+  const daysInMonth = new Date(year, monthNumber, 0).getDate();
   const cells: Array<string | null> = [
     ...Array.from({ length: mondayOffset }, () => null),
     ...Array.from(
@@ -3024,6 +3122,12 @@ function ContentCalendar({
   const monthItems = scheduled.filter((item) =>
     localDateKey(new Date(item.dueAt as string)).startsWith(monthKey),
   );
+  const selectedDayItems = selectedDay
+    ? scheduled.filter(
+        (item) =>
+          localDateKey(new Date(item.dueAt as string)) === selectedDay,
+      )
+    : [];
   const moveMonth = (offset: number) => {
     const nextMonth = monthNumber - 1 + offset;
     setMonth(
@@ -3045,10 +3149,10 @@ function ContentCalendar({
           <div className="flex flex-wrap justify-end gap-2">
             {canImport && (
               <label className="inline-flex h-9 cursor-pointer items-center gap-2 rounded-md border border-border bg-card px-3 text-sm font-medium text-card-foreground shadow-sm hover:bg-muted">
-                <FileUp className="size-4" /> Import month
+                <FileUp className="size-4" /> Import calendar
                 <input
                   type="file"
-                  accept=".xlsx"
+                  accept=".xlsx,.pdf,application/pdf,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                   className="sr-only"
                   onChange={(event) => {
                     const file = event.target.files?.[0];
@@ -3061,10 +3165,18 @@ function ContentCalendar({
             <Button variant="outline" size="sm" onClick={onExport}>
               <FileDown /> Export Excel
             </Button>
-            <HelpTip text="Admins can upload the existing monthly Excel format. Matching rows are skipped, so the same file can be checked again safely." />
+            <HelpTip text={`Admins can upload Excel up to ${EXCEL_IMPORT_LIMIT_BYTES / 1024 / 1024} MB or a text-based PDF up to ${PDF_IMPORT_LIMIT_BYTES / 1024 / 1024} MB, with at most ${CALENDAR_IMPORT_ROW_LIMIT.toLocaleString('en-IN')} dated rows. Matching rows are skipped safely.`} />
           </div>
         }
       />
+      {canImport && (
+        <p className="-mt-4 mb-5 text-sm text-muted-foreground">
+          Import .xlsx up to {EXCEL_IMPORT_LIMIT_BYTES / 1024 / 1024} MB or a
+          text-based .pdf up to {PDF_IMPORT_LIMIT_BYTES / 1024 / 1024} MB ·
+          maximum {CALENDAR_IMPORT_ROW_LIMIT.toLocaleString('en-IN')} dated
+          items per upload
+        </p>
+      )}
       <Card className="bg-card">
         <CardHeader className="flex-row items-center justify-between gap-3">
           <div>
@@ -3129,16 +3241,23 @@ function ContentCalendar({
                   >
                     {key && (
                       <>
-                        <div className="mb-2 flex items-center justify-between">
-                          <span
+                        <div className="mb-2 flex items-center justify-between gap-2">
+                          <button
+                            type="button"
+                            aria-label={`Open ${dayItems.length} scheduled item${dayItems.length === 1 ? '' : 's'} for ${key}`}
+                            onClick={() => setSelectedDay(key)}
                             className={`grid size-7 place-items-center rounded-full text-sm font-medium ${today ? 'bg-[#dfa126] text-[#211a08]' : 'text-card-foreground'}`}
                           >
                             {Number(key.slice(-2))}
-                          </span>
+                          </button>
                           {dayItems.length > 0 && (
-                            <span className="text-xs text-muted-foreground">
-                              {dayItems.length}
-                            </span>
+                            <button
+                              type="button"
+                              onClick={() => setSelectedDay(key)}
+                              className="rounded px-1.5 py-0.5 text-xs font-medium text-muted-foreground hover:bg-muted hover:text-card-foreground"
+                            >
+                              {dayItems.length} scheduled
+                            </button>
                           )}
                         </div>
                         <div className="space-y-1.5">
@@ -3157,9 +3276,13 @@ function ContentCalendar({
                             </button>
                           ))}
                           {dayItems.length > 3 && (
-                            <p className="px-1 text-xs font-medium text-[var(--warning-foreground)]">
+                            <button
+                              type="button"
+                              onClick={() => setSelectedDay(key)}
+                              className="w-full rounded px-1 py-1 text-left text-xs font-medium text-[var(--warning-foreground)] hover:bg-[var(--warning-subtle)]"
+                            >
                               +{dayItems.length - 3} more
-                            </p>
+                            </button>
                           )}
                         </div>
                       </>
@@ -3171,6 +3294,68 @@ function ContentCalendar({
           </div>
         </CardContent>
       </Card>
+      <Dialog
+        open={Boolean(selectedDay)}
+        onOpenChange={(open) => !open && setSelectedDay(undefined)}
+      >
+        <DialogContent className="max-h-[85vh] overflow-y-auto sm:max-w-xl">
+          <DialogHeader>
+            <DialogTitle className="font-display text-xl">
+              {selectedDay
+                ? new Intl.DateTimeFormat('en-IN', {
+                    timeZone: 'Asia/Kolkata',
+                    weekday: 'long',
+                    day: 'numeric',
+                    month: 'long',
+                    year: 'numeric',
+                  }).format(new Date(`${selectedDay}T12:00:00+05:30`))
+                : 'Day agenda'}
+            </DialogTitle>
+            <DialogDescription>
+              {selectedDayItems.length} scheduled content{' '}
+              {selectedDayItems.length === 1 ? 'item' : 'items'}
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-2">
+            {selectedDayItems.map((item) => (
+              <button
+                key={item.id}
+                type="button"
+                onClick={() => {
+                  setSelectedDay(undefined);
+                  onOpen(item.id);
+                }}
+                className="flex w-full items-start justify-between gap-3 rounded-xl border border-border bg-card p-3.5 text-left transition hover:border-[#dfa126] hover:bg-muted/50"
+              >
+                <span className="min-w-0">
+                  <span className="block font-semibold text-card-foreground">
+                    {item.title}
+                  </span>
+                  <span className="mt-1 block text-sm text-muted-foreground">
+                    {item.platform} · {item.contentType} · {item.stage}
+                  </span>
+                  <span className="mt-1 block text-xs text-muted-foreground">
+                    {item.accountable.length
+                      ? `Accountable: ${item.accountable.map((person) => person.name).join(', ')}`
+                      : 'Accountable owner not assigned'}
+                  </span>
+                </span>
+                <span className="flex shrink-0 items-center gap-2">
+                  {item.workflowRoute === 'Ad hoc fast track' && (
+                    <Badge className="bg-[var(--warning-subtle)] text-[var(--warning-foreground)]">
+                      Ad hoc
+                    </Badge>
+                  )}
+                  <ChevronRight className="size-4 text-muted-foreground" />
+                </span>
+              </button>
+            ))}
+            {!selectedDayItems.length && (
+              <EmptyState text="No content is scheduled for this day." />
+            )}
+          </div>
+        </DialogContent>
+      </Dialog>
       {canImport && (
         <Collapsible>
           <Card className="mt-5 bg-card">
@@ -4546,7 +4731,10 @@ function Settings({
   demoMode,
   raci,
   canManage,
+  canManageRaci,
   onEditRaci,
+  defaultReminderHours,
+  onSaveReminder,
   cadences,
   cadenceRuns,
   currentPerson,
@@ -4558,7 +4746,10 @@ function Settings({
   demoMode: boolean;
   raci: Record<Stage, RaciAssignment>;
   canManage: boolean;
+  canManageRaci: boolean;
   onEditRaci: (stage: Stage) => void;
+  defaultReminderHours: number;
+  onSaveReminder: (hours: number) => void;
   cadences: OperatingCadence[];
   cadenceRuns: CadenceRun[];
   currentPerson: Person;
@@ -4567,8 +4758,7 @@ function Settings({
   onToggleCadence: (cadence: OperatingCadence) => void;
   onCompleteCadence: (cadence: OperatingCadence, scheduledFor: string) => void;
 }) {
-  const [hours, setHours] = useState(24);
-  const [savedHours, setSavedHours] = useState(24);
+  const [hours, setHours] = useState(defaultReminderHours);
   const integrations = [
     {
       name: 'Zoho Social',
@@ -4605,7 +4795,8 @@ function Settings({
                 <HelpTip text="These are the agreed default owners for each stage. Changes update active work and become the starting point for future content." />
               </div>
               <CardDescription className="mt-1">
-                The team brief, kept as a workspace setting.
+                The team brief, kept as a workspace setting. Only the protected
+                Owner can change these defaults.
               </CardDescription>
             </div>
           </CardHeader>
@@ -4618,7 +4809,7 @@ function Settings({
                   <TableHead>Accountable</TableHead>
                   <TableHead>Consulted</TableHead>
                   <TableHead>Informed</TableHead>
-                  {canManage && (
+                  {canManageRaci && (
                     <TableHead className="text-right">Action</TableHead>
                   )}
                 </TableRow>
@@ -4639,7 +4830,7 @@ function Settings({
                     <TableCell>
                       <RaciPeople people={raci[stage].informed} />
                     </TableCell>
-                    {canManage && (
+                    {canManageRaci && (
                       <TableCell className="text-right">
                         <Button
                           variant="outline"
@@ -4801,11 +4992,15 @@ function Settings({
                     max="720"
                     value={hours}
                     onChange={(event) => setHours(Number(event.target.value))}
+                    disabled={!canManage}
                   />
-                  <Button onClick={() => setSavedHours(hours)}>Save</Button>
+                  {canManage && (
+                    <Button onClick={() => onSaveReminder(hours)}>Save</Button>
+                  )}
                 </div>
                 <p className="mt-2 text-xs text-muted-foreground">
-                  {savedHours} hours before the due date
+                  Saved workspace default: {defaultReminderHours} hours before
+                  the due date
                 </p>
               </div>
               <div className="grid gap-3 border-t border-border pt-4 text-sm sm:grid-cols-3">
@@ -4918,6 +5113,10 @@ function ItemDetail({
   const readOnly = roles.length === 1 && roles[0] === 'Read-only Stakeholder';
   const canSubmit = canSubmitItem(item, roles, person);
   const canApprove = canApproveItem(item, roles, person);
+  const approvalRequiresReview =
+    ['Script', 'Production'].includes(item.stage) &&
+    item.secondLens !== 'Approved' &&
+    !roles.includes('Owner');
   const visibleSteps =
     item.workflowRoute === 'Ad hoc fast track' && item.stage === 'Production'
       ? ['Ad hoc publish check']
@@ -5297,8 +5496,14 @@ function ItemDetail({
                     placeholder="Required only when requesting changes"
                   />
                   <div className="flex flex-wrap gap-2">
-                    <Button disabled={busy} onClick={() => onApprove(item)}>
-                      <Check /> Approve & move forward
+                    <Button
+                      disabled={busy || approvalRequiresReview}
+                      onClick={() => onApprove(item)}
+                    >
+                      <Check />{' '}
+                      {approvalRequiresReview
+                        ? 'Independent review required'
+                        : 'Approve & move forward'}
                     </Button>
                     <Button
                       disabled={busy}
@@ -5925,8 +6130,12 @@ function CadenceEditor({
           ))}
         </div>
       </div>
-      <label className="flex cursor-pointer items-center gap-2 text-sm">
+      <label
+        htmlFor="cadence-active"
+        className="flex cursor-pointer items-center gap-2 text-sm"
+      >
         <Checkbox
+          id="cadence-active"
           checked={draft.active}
           onCheckedChange={(checked) =>
             setDraft({ ...draft, active: Boolean(checked) })
@@ -6110,12 +6319,12 @@ function CalendarImportDialog({
       <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-4xl">
         <DialogHeader>
           <DialogTitle className="font-display text-xl">
-            Import master calendar
+            Review calendar import
           </DialogTitle>
           <DialogDescription>
-            Active and future rows plus the prior 30 days will be added as
-            separate platform-specific items. Matching rows already imported are
-            skipped.
+            {rows?.[0]?.importSource ?? 'Calendar file'} · active and future
+            rows plus the prior 30 days will be added as separate content
+            items. Matching rows already imported are skipped.
           </DialogDescription>
         </DialogHeader>
         <div className="flex flex-wrap gap-2">
@@ -6175,7 +6384,7 @@ function CalendarImportDialog({
             Cancel
           </Button>
           <Button onClick={onImport} disabled={busy || !rows?.length}>
-            <FileUp /> {busy ? 'Importing…' : 'Import into pipeline'}
+            <FileUp /> {busy ? 'Importing…' : 'Import calendar'}
           </Button>
         </DialogFooter>
       </DialogContent>
@@ -6422,11 +6631,11 @@ function OverrideDialog({
     <Dialog open={Boolean(item)} onOpenChange={onOpenChange}>
       <DialogContent>
         <DialogHeader>
-          <DialogTitle>Advance without the required human review?</DialogTitle>
+          <DialogTitle>Use a protected Owner override?</DialogTitle>
           <DialogDescription>
-            This exception is recorded permanently and Owners, admins and
-            reviewers are notified. Financial compliance and final brand
-            approval should only be overridden in a documented emergency.
+            Use this only when an assigned approval or required second-lens
+            review cannot be completed in time. The reason is recorded
+            permanently, and admins and reviewers are notified.
           </DialogDescription>
         </DialogHeader>
         <Textarea
@@ -6604,13 +6813,12 @@ function LoginScreen({
                 />
               </div>
               {notice && (
-                <p
-                  role="status"
+                <output
                   aria-live="polite"
                   className="text-sm text-[var(--danger-foreground)]"
                 >
                   {notice}
-                </p>
+                </output>
               )}
               <Button type="submit" className="w-full" disabled={busy}>
                 {busy ? 'Signing in…' : 'Sign in'}

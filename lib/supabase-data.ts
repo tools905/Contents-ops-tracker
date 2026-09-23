@@ -64,6 +64,7 @@ export type LiveSnapshot = {
   cadenceRuns: CadenceRun[];
   raciDefaults: Record<Stage, RaciAssignment>;
   importBatches: CalendarImportBatch[];
+  defaultReminderHours: number;
 };
 
 export async function loadLiveSnapshot(
@@ -87,6 +88,7 @@ export async function loadLiveSnapshot(
     cadenceRunsRes,
     raciDefaultsRes,
     importBatchesRes,
+    settingsRes,
   ] = await Promise.all([
     client
       .from('profiles')
@@ -134,6 +136,11 @@ export async function loadLiveSnapshot(
       .select('*')
       .order('created_at', { ascending: false })
       .limit(12),
+    client
+      .from('app_settings')
+      .select('key,value')
+      .eq('key', 'default_reminder_hours')
+      .maybeSingle(),
   ]);
   const error = [
     profilesRes,
@@ -152,6 +159,7 @@ export async function loadLiveSnapshot(
     cadenceRunsRes,
     raciDefaultsRes,
     importBatchesRes,
+    settingsRes,
   ].find((result) => result.error)?.error;
   if (error) throw error;
 
@@ -437,5 +445,9 @@ export async function loadLiveSnapshot(
     cadenceRuns,
     raciDefaults,
     importBatches,
+    defaultReminderHours:
+      typeof settingsRes.data?.value === 'number'
+        ? settingsRes.data.value
+        : Number(settingsRes.data?.value ?? 24),
   };
 }

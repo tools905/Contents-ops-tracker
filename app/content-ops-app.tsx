@@ -18,8 +18,11 @@ import {
   CalendarDays,
   Check,
   CheckCircle2,
+  ChevronDown,
+  ChevronLeft,
   ChevronRight,
   CircleGauge,
+  CircleHelp,
   Clock3,
   ExternalLink,
   Eye,
@@ -60,6 +63,11 @@ import {
   CardTitle,
 } from '@/components/ui/card';
 import { Checkbox } from '@/components/ui/checkbox';
+import {
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger,
+} from '@/components/ui/collapsible';
 import {
   Dialog,
   DialogContent,
@@ -109,6 +117,12 @@ import {
 } from '@/components/ui/table';
 import { Textarea } from '@/components/ui/textarea';
 import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from '@/components/ui/tooltip';
+import {
   demoCadenceRuns,
   demoCadences,
   demoItems,
@@ -122,6 +136,7 @@ import {
   STAGE_STEPS,
   nextRouteStage,
   type AppRole,
+  type CalendarImportBatch,
   type CadenceFrequency,
   type CadenceRun,
   type Comment,
@@ -146,15 +161,12 @@ import {
 type View =
   | 'today'
   | 'pipeline'
-  | 'raci'
   | 'calendar'
-  | 'cadence'
   | 'requests'
   | 'people'
   | 'settings';
 type MoveIntent = { item: ContentItem; toStage: Stage };
 type MetricDraft = Omit<MetricEntry, 'id' | 'source'>;
-type RaciIntent = { item: ContentItem; stage: Stage };
 type InviteDraft = {
   profileId?: string;
   email: string;
@@ -209,9 +221,7 @@ const nav: Array<{ view: View; label: string; icon: typeof LayoutDashboard }> =
   [
     { view: 'today', label: 'Today', icon: LayoutDashboard },
     { view: 'pipeline', label: 'Content pipeline', icon: FileText },
-    { view: 'raci', label: 'RACI matrix', icon: ShieldCheck },
     { view: 'calendar', label: 'Calendar', icon: CalendarDays },
-    { view: 'cadence', label: 'Operating cadence', icon: RefreshCw },
     { view: 'requests', label: 'Content requests', icon: MessageSquareText },
     { view: 'people', label: 'People & access', icon: Users2 },
     { view: 'settings', label: 'Settings', icon: Settings2 },
@@ -235,18 +245,22 @@ export default function ContentOpsApp({
   const [requests, setRequests] = useState<DepartmentRequest[]>(demoRequests);
   const [cadences, setCadences] = useState<OperatingCadence[]>(demoCadences);
   const [cadenceRuns, setCadenceRuns] = useState<CadenceRun[]>(demoCadenceRuns);
+  const [raciDefaults, setRaciDefaults] =
+    useState<Record<Stage, RaciAssignment>>(defaultRaci);
+  const [importBatches, setImportBatches] = useState<CalendarImportBatch[]>([]);
   const [currentUser, setCurrentUser] = useState<Person>(demoPeople[0]);
   const [currentRole, setCurrentRole] = useState<AppRole>('Owner');
-  const [previewRole, setPreviewRole] = useState<
-    Exclude<AppRole, 'Owner'> | null
-  >(null);
+  const [previewRole, setPreviewRole] = useState<Exclude<
+    AppRole,
+    'Owner'
+  > | null>(null);
   const [needsPasswordSetup, setNeedsPasswordSetup] = useState(false);
   const [view, setView] = useState<View>('today');
   const [selectedId, setSelectedId] = useState<string>();
   const [createOpen, setCreateOpen] = useState(false);
   const [inviteTarget, setInviteTarget] = useState<Person | 'new'>();
   const [importRows, setImportRows] = useState<CalendarImportRow[]>();
-  const [raciIntent, setRaciIntent] = useState<RaciIntent>();
+  const [raciStageIntent, setRaciStageIntent] = useState<Stage>();
   const [cadenceEditor, setCadenceEditor] = useState<
     OperatingCadence | 'new'
   >();
@@ -264,6 +278,8 @@ export default function ContentOpsApp({
       setRequests(snapshot.requests);
       setCadences(snapshot.cadences);
       setCadenceRuns(snapshot.cadenceRuns);
+      setRaciDefaults(snapshot.raciDefaults);
+      setImportBatches(snapshot.importBatches);
       setCurrentUser(snapshot.currentUser);
       setActiveProfile(snapshot.currentUserActive);
       if (snapshot.currentUser.roles.length)
@@ -483,8 +499,7 @@ export default function ContentOpsApp({
                 : new Date(Date.now() + 48 * 3600_000).toISOString(),
               secondLens: reason
                 ? 'Overridden'
-                : last ||
-                    !['Script', 'Production'].includes(nextStage ?? '')
+                : last || !['Script', 'Production'].includes(nextStage ?? '')
                   ? 'Not needed'
                   : 'Awaiting review',
               history: [
@@ -855,7 +870,7 @@ export default function ContentOpsApp({
     const initialStage: Stage =
       draft.workflowRoute === 'Ad hoc fast track' ? 'Production' : 'Idea';
     const raci = Object.fromEntries(
-      PIPELINE.map((stage) => [stage, { ...defaultRaci[stage] }]),
+      PIPELINE.map((stage) => [stage, { ...raciDefaults[stage] }]),
     ) as Record<Stage, RaciAssignment>;
     if (draft.accountableIds.length)
       raci[initialStage] = {
@@ -913,7 +928,9 @@ export default function ContentOpsApp({
       setImportRows(rows);
     } catch (error) {
       showNotice(
-        error instanceof Error ? error.message : 'The Excel file could not be read.',
+        error instanceof Error
+          ? error.message
+          : 'The Excel file could not be read.',
       );
     }
   };
@@ -924,6 +941,7 @@ export default function ContentOpsApp({
       const saved = await mutateLive(async (supabase) => {
         const { error } = await supabase.rpc('bulk_import_content', {
           p_items: importRows.map((row) => ({
+            import_source: row.importSource,
             source_key: row.sourceKey,
             source_label: row.sourceLabel,
             title: row.title,
@@ -944,7 +962,7 @@ export default function ContentOpsApp({
     }
     const created: ContentItem[] = importRows.map((row) => {
       const raci = Object.fromEntries(
-        PIPELINE.map((stage) => [stage, { ...defaultRaci[stage] }]),
+        PIPELINE.map((stage) => [stage, { ...raciDefaults[stage] }]),
       ) as Record<Stage, RaciAssignment>;
       return {
         id: crypto.randomUUID(),
@@ -976,16 +994,40 @@ export default function ContentOpsApp({
       };
     });
     setItems((all) => [...created, ...all]);
+    setImportBatches((all) => [
+      {
+        id: crypto.randomUUID(),
+        sourceName: importRows[0]?.importSource ?? 'Monthly calendar.xlsx',
+        importedBy: rolePerson,
+        importedAt: new Date().toISOString(),
+        rowCount: importRows.length,
+        importedCount: created.length,
+        skippedCount: 0,
+        windowStart: importRows.map((row) => row.dueAt).sort()[0],
+        windowEnd: importRows
+          .map((row) => row.dueAt)
+          .sort()
+          .at(-1),
+      },
+      ...all,
+    ]);
     setImportRows(undefined);
     showNotice(`${created.length} calendar rows imported into the pipeline.`);
   };
 
   const exportWorkbook = async () => {
     try {
-      await exportTrackerWorkbook({ items: visibleItems, people, cadences, requests });
+      await exportTrackerWorkbook({
+        items: visibleItems,
+        people,
+        cadences,
+        requests,
+      });
       showNotice('Excel export downloaded.');
     } catch (error) {
-      showNotice(error instanceof Error ? error.message : 'Excel export failed.');
+      showNotice(
+        error instanceof Error ? error.message : 'Excel export failed.',
+      );
     }
   };
 
@@ -1011,15 +1053,10 @@ export default function ContentOpsApp({
     showNotice('Content request submitted.');
   };
 
-  const saveRaci = async (
-    item: ContentItem,
-    stage: Stage,
-    assignment: RaciAssignment,
-  ) => {
+  const saveRaciDefault = async (stage: Stage, assignment: RaciAssignment) => {
     if (!demoMode) {
       const saved = await mutateLive(async (supabase) => {
-        const { error } = await supabase.rpc('replace_stage_raci', {
-          p_item_id: item.id,
+        const { error } = await supabase.rpc('replace_workflow_raci_default', {
           p_stage: stageToDb[stage],
           p_responsible_ids: assignment.responsible.map((person) => person.id),
           p_accountable_ids: assignment.accountable.map((person) => person.id),
@@ -1027,13 +1064,14 @@ export default function ContentOpsApp({
           p_informed_ids: assignment.informed.map((person) => person.id),
         });
         if (error) throw error;
-      }, `${stage} RACI updated.`);
-      if (saved) setRaciIntent(undefined);
+      }, `${stage} ownership updated for active and future content.`);
+      if (saved) setRaciStageIntent(undefined);
       return;
     }
+    setRaciDefaults((all) => ({ ...all, [stage]: assignment }));
     setItems((all) =>
       all.map((row) =>
-        row.id === item.id
+        row.lifecycle === 'Active'
           ? {
               ...row,
               raci: { ...row.raci, [stage]: assignment },
@@ -1048,7 +1086,7 @@ export default function ContentOpsApp({
               history: [
                 ...row.history,
                 {
-                  action: `${stage} RACI updated`,
+                  action: `${stage} workflow ownership updated`,
                   actor: rolePerson.name,
                   at: 'Just now',
                 },
@@ -1057,8 +1095,8 @@ export default function ContentOpsApp({
           : row,
       ),
     );
-    setRaciIntent(undefined);
-    showNotice(`${stage} RACI updated.`);
+    setRaciStageIntent(undefined);
+    showNotice(`${stage} ownership updated for active and future content.`);
   };
 
   const saveCadence = async (draft: CadenceDraft) => {
@@ -1412,8 +1450,12 @@ export default function ContentOpsApp({
                   }}
                   className="max-w-[210px] bg-card pl-8"
                 >
-                  <NativeSelectOption value="Owner">Owner view</NativeSelectOption>
-                  <NativeSelectOption value="Admin">Preview Admin</NativeSelectOption>
+                  <NativeSelectOption value="Owner">
+                    Owner view
+                  </NativeSelectOption>
+                  <NativeSelectOption value="Admin">
+                    Preview Admin
+                  </NativeSelectOption>
                   <NativeSelectOption value="Content Producer">
                     Preview Content Producer
                   </NativeSelectOption>
@@ -1528,8 +1570,8 @@ export default function ContentOpsApp({
               items={visibleItems}
               actions={myActions}
               roles={effectiveRoles}
-              cadences={visibleCadences}
-              cadenceRuns={cadenceRuns}
+              person={rolePerson}
+              people={people}
               onOpen={(id) => setSelectedId(id)}
               onReview={secondLensReview}
               setView={setView}
@@ -1540,39 +1582,18 @@ export default function ContentOpsApp({
               items={visibleItems}
               roles={effectiveRoles}
               person={rolePerson}
-              canImport={canManageOperations}
               onOpen={(id) => setSelectedId(id)}
               onMove={requestMove}
-              onImport={prepareCalendarImport}
-              onExport={() => void exportWorkbook()}
-            />
-          )}
-          {view === 'raci' && (
-            <RaciMatrix
-              items={visibleItems}
-              canManage={canManageOperations}
-              onEdit={(item, stage) => setRaciIntent({ item, stage })}
-              onOpen={(id) => setSelectedId(id)}
             />
           )}
           {view === 'calendar' && (
             <ContentCalendar
               items={visibleItems}
-              cadences={visibleCadences}
-              cadenceRuns={cadenceRuns}
+              importBatches={importBatches}
+              canImport={canManageOperations}
+              onImport={prepareCalendarImport}
+              onExport={() => void exportWorkbook()}
               onOpen={(id) => setSelectedId(id)}
-            />
-          )}
-          {view === 'cadence' && (
-            <OperatingCadenceView
-              cadences={visibleCadences}
-              cadenceRuns={cadenceRuns}
-              canManage={canManageOperations}
-              currentPerson={rolePerson}
-              onCreate={() => setCadenceEditor('new')}
-              onEdit={(cadence) => setCadenceEditor(cadence)}
-              onToggle={toggleCadence}
-              onComplete={completeCadenceRun}
             />
           )}
           {view === 'requests' && (
@@ -1592,7 +1613,21 @@ export default function ContentOpsApp({
               onManage={manageAccess}
             />
           )}
-          {view === 'settings' && <Settings demoMode={demoMode} />}
+          {view === 'settings' && (
+            <Settings
+              demoMode={demoMode}
+              raci={raciDefaults}
+              canManage={canManageOperations}
+              onEditRaci={setRaciStageIntent}
+              cadences={visibleCadences}
+              cadenceRuns={cadenceRuns}
+              currentPerson={rolePerson}
+              onCreateCadence={() => setCadenceEditor('new')}
+              onEditCadence={(cadence) => setCadenceEditor(cadence)}
+              onToggleCadence={toggleCadence}
+              onCompleteCadence={completeCadenceRun}
+            />
+          )}
         </main>
       </SidebarInset>
       <CreateDialog
@@ -1603,7 +1638,7 @@ export default function ContentOpsApp({
         onCreate={createItem}
       />
       <InviteUserDialog
-        key={inviteTarget === 'new' ? 'new' : inviteTarget?.id ?? 'closed'}
+        key={inviteTarget === 'new' ? 'new' : (inviteTarget?.id ?? 'closed')}
         open={Boolean(inviteTarget)}
         onOpenChange={(open) => !open && setInviteTarget(undefined)}
         person={inviteTarget === 'new' ? undefined : inviteTarget}
@@ -1630,11 +1665,12 @@ export default function ContentOpsApp({
         onComment={addComment}
         onResolveComment={setCommentResolution}
       />
-      <RaciDialog
-        intent={raciIntent}
+      <RaciDefaultDialog
+        stage={raciStageIntent}
+        assignment={raciStageIntent ? raciDefaults[raciStageIntent] : undefined}
         people={people}
-        onOpenChange={(open) => !open && setRaciIntent(undefined)}
-        onSave={saveRaci}
+        onOpenChange={(open) => !open && setRaciStageIntent(undefined)}
+        onSave={saveRaciDefault}
       />
       <CadenceDialog
         cadence={cadenceEditor}
@@ -1729,12 +1765,7 @@ function filterForRoles(
 
 type ActionItem = {
   item: ContentItem;
-  kind:
-    | 'approval'
-    | 'second-lens'
-    | 'work'
-    | 'consultation'
-    | 'feedback';
+  kind: 'approval' | 'second-lens' | 'work' | 'consultation' | 'feedback';
   label: string;
   priority: number;
 };
@@ -1743,7 +1774,6 @@ function getMyActions(
   roles: AppRole[],
   person: Person,
 ): ActionItem[] {
-  const elevated = hasAnyRole(roles, ['Owner', 'Admin']);
   const actions: ActionItem[] = [];
   for (const item of items.filter((row) => row.lifecycle === 'Active')) {
     const openFeedback = item.comments.filter(
@@ -1754,8 +1784,7 @@ function getMyActions(
     ).length;
     if (
       openFeedback > 0 &&
-      (elevated ||
-        isAssigned(item, person, 'responsible') ||
+      (isAssigned(item, person, 'responsible') ||
         isAssigned(item, person, 'accountable'))
     )
       actions.push({
@@ -1773,7 +1802,7 @@ function getMyActions(
       });
     if (
       item.status === 'Pending approval' &&
-      (elevated || isAssigned(item, person, 'accountable'))
+      isAssigned(item, person, 'accountable')
     )
       actions.push({
         item,
@@ -1784,7 +1813,8 @@ function getMyActions(
     if (
       ['Script', 'Production'].includes(item.stage) &&
       item.secondLens === 'Awaiting review' &&
-      (elevated || roles.includes('Content Approver'))
+      (roles.includes('Content Approver') ||
+        isAssigned(item, person, 'accountable'))
     )
       actions.push({
         item,
@@ -1794,7 +1824,7 @@ function getMyActions(
       });
     if (
       item.status !== 'Pending approval' &&
-      (elevated ? isOverdue(item) : isAssigned(item, person, 'responsible'))
+      isAssigned(item, person, 'responsible')
     )
       actions.push({
         item,
@@ -1818,6 +1848,55 @@ function isOverdue(item: ContentItem) {
     item.dueAt &&
     new Date(item.dueAt).getTime() < Date.now() &&
     item.lifecycle === 'Active',
+  );
+}
+function stageAgeHours(item: ContentItem) {
+  const stageEntries = item.history
+    .filter(
+      (event) =>
+        event.toStage === item.stage &&
+        event.occurredAt &&
+        !Number.isNaN(new Date(event.occurredAt).valueOf()),
+    )
+    .map((event) => new Date(event.occurredAt as string).getTime());
+  const enteredAt = stageEntries.length
+    ? Math.max(...stageEntries)
+    : new Date(item.updatedAt ?? item.createdAt ?? Date.now()).getTime();
+  return Math.max(0, (Date.now() - enteredAt) / 3_600_000);
+}
+function formatFlowAge(hours: number) {
+  if (!Number.isFinite(hours) || hours < 1) return '<1h';
+  if (hours < 24) return `${Math.round(hours)}h`;
+  const days = hours / 24;
+  return `${days < 10 ? days.toFixed(1) : Math.round(days)}d`;
+}
+function isFlowStalled(item: ContentItem) {
+  if (item.lifecycle !== 'Active') return false;
+  const targetHours = item.workflowRoute === 'Ad hoc fast track' ? 8 : 48;
+  return isOverdue(item) || stageAgeHours(item) > targetHours;
+}
+function ownsCurrentWork(item: ContentItem, person: Person) {
+  return (
+    isAssigned(item, person, 'responsible') ||
+    (item.status === 'Pending approval' &&
+      isAssigned(item, person, 'accountable'))
+  );
+}
+function countRecentHandoffs(items: ContentItem[], person: Person) {
+  const cutoff = Date.now() - 30 * 24 * 3_600_000;
+  return items.reduce(
+    (count, item) =>
+      count +
+      item.history.filter((event) => {
+        const action = event.action.toLowerCase();
+        return (
+          event.actor === person.name &&
+          Boolean(event.occurredAt) &&
+          new Date(event.occurredAt as string).getTime() >= cutoff &&
+          /(submitted|approved|advanced|closed)/.test(action)
+        );
+      }).length,
+    0,
   );
 }
 function dueLabel(item: ContentItem) {
@@ -1975,7 +2054,7 @@ function PageTitle({
 }: {
   eyebrow: string;
   title: string;
-  description: string;
+  description?: string;
   action?: ReactNode;
 }) {
   return (
@@ -1985,12 +2064,37 @@ function PageTitle({
         <h1 className="font-display text-3xl font-semibold tracking-[-0.03em] text-card-foreground sm:text-4xl">
           {title}
         </h1>
-        <p className="mt-2 max-w-2xl text-base text-muted-foreground">
-          {description}
-        </p>
+        {description && (
+          <p className="mt-2 max-w-2xl text-base text-muted-foreground">
+            {description}
+          </p>
+        )}
       </div>
       {action}
     </div>
+  );
+}
+
+function HelpTip({ text }: { text: string }) {
+  return (
+    <TooltipProvider>
+      <Tooltip>
+        <TooltipTrigger
+          render={
+            <button
+              type="button"
+              aria-label="More information"
+              className="grid size-8 shrink-0 place-items-center rounded-full text-muted-foreground transition hover:bg-muted hover:text-card-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#dfa126]"
+            >
+              <CircleHelp className="size-4" />
+            </button>
+          }
+        />
+        <TooltipContent side="bottom" className="max-w-72 leading-relaxed">
+          {text}
+        </TooltipContent>
+      </Tooltip>
+    </TooltipProvider>
   );
 }
 
@@ -2047,8 +2151,8 @@ function Today({
   items,
   actions,
   roles,
-  cadences,
-  cadenceRuns,
+  person,
+  people,
   onOpen,
   onReview,
   setView,
@@ -2056,13 +2160,15 @@ function Today({
   items: ContentItem[];
   actions: ActionItem[];
   roles: AppRole[];
-  cadences: OperatingCadence[];
-  cadenceRuns: CadenceRun[];
+  person: Person;
+  people: Person[];
   onOpen: (id: string) => void;
   onReview: (item: ContentItem, approved: boolean, note: string) => void;
   setView: (view: View) => void;
 }) {
-  const active = items.filter((item) => item.lifecycle === 'Active');
+  const active = items.filter(
+    (item) => item.lifecycle === 'Active' && isAssigned(item, person),
+  );
   const approvals = actions.filter(
     (action) => action.kind === 'approval' || action.kind === 'second-lens',
   );
@@ -2073,12 +2179,18 @@ function Today({
       action.kind === 'feedback',
   );
   const overdue = active.filter(isOverdue);
+  const stalled = active.filter(isFlowStalled);
+  const averageAge = active.length
+    ? active.reduce((sum, item) => sum + stageAgeHours(item), 0) / active.length
+    : 0;
   return (
     <>
       <PageTitle
-        eyebrow="TODAY"
-        title="One clear list. Then keep moving."
-        description="This page changes with the login: assigned work, approvals and follow-ups appear only for the person who needs to act."
+        eyebrow="YOUR WORK"
+        title="Today"
+        action={
+          <HelpTip text="This view uses the signed-in person's stage assignments. It does not show the full workspace unless that work is assigned to them." />
+        }
       />
       <section className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
         <MetricCard
@@ -2104,10 +2216,15 @@ function Today({
           warning
         />
         <MetricCard
-          label="Visible content"
-          value={String(items.length)}
-          detail="Filtered for your role and assignments"
+          label="Average stage age"
+          value={formatFlowAge(averageAge)}
+          detail={
+            stalled.length
+              ? `${stalled.length} need attention`
+              : 'No bottleneck risk'
+          }
           icon={CircleGauge}
+          warning={stalled.length > 0}
         />
       </section>
       <section className="mt-6 grid gap-5 xl:grid-cols-[minmax(0,1.45fr)_minmax(320px,.75fr)]">
@@ -2115,10 +2232,6 @@ function Today({
           <Card className="bg-card">
             <CardHeader>
               <CardTitle>Approval queue</CardTitle>
-              <CardDescription>
-                Items shown here are waiting for your review or accountable
-                sign-off.
-              </CardDescription>
             </CardHeader>
             <CardContent className="space-y-3">
               {approvals.length ? (
@@ -2147,9 +2260,6 @@ function Today({
           <Card className="bg-card">
             <CardHeader>
               <CardTitle>Your work and input</CardTitle>
-              <CardDescription>
-                Work assigned to you, ordered by urgency.
-              </CardDescription>
             </CardHeader>
             <CardContent className="space-y-3">
               {assigned.length ? (
@@ -2170,41 +2280,30 @@ function Today({
         <div className="space-y-5">
           <Card className="bg-card">
             <CardHeader>
-              <CardTitle>Next operating checkpoint</CardTitle>
+              <CardTitle>Your flow</CardTitle>
+              <CardAction>
+                <HelpTip text="Stage age starts when a content item enters its current stage. Ad hoc work is flagged after 8 hours; standard work after 48 hours." />
+              </CardAction>
             </CardHeader>
-            <CardContent className="space-y-3">
-              {getCadenceOccurrences(cadences, 30)
-                .filter(
-                  ({ cadence, scheduledFor }) =>
-                    !cadenceRuns.some(
-                      (run) =>
-                        run.cadenceId === cadence.id &&
-                        run.scheduledFor === scheduledFor &&
-                        run.status === 'Complete',
-                    ),
-                )
-                .slice(0, 1)
-                .map(({ cadence, scheduledFor }) => (
-                  <div key={cadence.id}>
-                    <p className="text-sm font-semibold">{cadence.name}</p>
-                    <p className="mt-1 text-sm text-muted-foreground">
-                      {formatCadenceDate(scheduledFor)}
-                    </p>
-                    <p className="mt-2 text-sm text-muted-foreground">
-                      {cadence.deliverable}
-                    </p>
-                  </div>
-                ))}
-              <Button variant="outline" onClick={() => setView('cadence')}>
-                Open cadence <ChevronRight />
-              </Button>
+            <CardContent className="grid grid-cols-3 gap-3">
+              <FlowNumber label="In progress" value={active.length} />
+              <FlowNumber
+                label="Stalled"
+                value={stalled.length}
+                danger={stalled.length > 0}
+              />
+              <FlowNumber
+                label="Overdue"
+                value={overdue.length}
+                danger={overdue.length > 0}
+              />
             </CardContent>
           </Card>
           <Card className="bg-[#202546] text-white ring-0">
             <CardHeader>
               <CardTitle>Pipeline pulse</CardTitle>
               <CardDescription className="text-white/55">
-                {active.length} active content items
+                {active.length} items assigned to {person.name}
               </CardDescription>
               <CardAction>
                 <Button
@@ -2242,25 +2341,138 @@ function Today({
               ))}
             </CardContent>
           </Card>
-          <Card className="bg-card">
-            <CardHeader>
-              <CardTitle>Your dashboard scope</CardTitle>
-              <CardDescription>
-                Based on your current access: {roles.join(' · ')}
-              </CardDescription>
-            </CardHeader>
-            <CardContent className="space-y-3 text-sm text-muted-foreground">
-              <div className="rounded-xl border bg-muted/60 p-3">
-                {dashboardScope(roles)}
-              </div>
-              <Button variant="outline" onClick={() => setView('pipeline')}>
-                Open content pipeline <ChevronRight />
-              </Button>
-            </CardContent>
-          </Card>
         </div>
       </section>
+      {hasAnyRole(roles, ['Owner', 'Admin']) && (
+        <TeamFlow people={people} items={items} onOpen={onOpen} />
+      )}
     </>
+  );
+}
+
+function FlowNumber({
+  label,
+  value,
+  danger = false,
+}: {
+  label: string;
+  value: number;
+  danger?: boolean;
+}) {
+  return (
+    <div className="rounded-xl bg-muted p-3 text-center">
+      <p
+        className={`font-display text-2xl font-semibold ${danger ? 'text-[var(--danger-foreground)]' : 'text-card-foreground'}`}
+      >
+        {value}
+      </p>
+      <p className="mt-1 text-xs text-muted-foreground">{label}</p>
+    </div>
+  );
+}
+
+function TeamFlow({
+  people,
+  items,
+  onOpen,
+}: {
+  people: Person[];
+  items: ContentItem[];
+  onOpen: (id: string) => void;
+}) {
+  const rows = people
+    .map((person) => {
+      const assigned = items.filter(
+        (item) => item.lifecycle === 'Active' && ownsCurrentWork(item, person),
+      );
+      const oldest = [...assigned].sort(
+        (a, b) => stageAgeHours(b) - stageAgeHours(a),
+      )[0];
+      return {
+        person,
+        assigned,
+        stalled: assigned.filter(isFlowStalled).length,
+        overdue: assigned.filter(isOverdue).length,
+        averageAge: assigned.length
+          ? assigned.reduce((sum, item) => sum + stageAgeHours(item), 0) /
+            assigned.length
+          : 0,
+        handoffs: countRecentHandoffs(items, person),
+        oldest,
+      };
+    })
+    .filter((row) => row.assigned.length || row.handoffs)
+    .sort(
+      (a, b) =>
+        b.stalled - a.stalled ||
+        b.overdue - a.overdue ||
+        b.averageAge - a.averageAge,
+    );
+  return (
+    <Card className="mt-5 bg-card">
+      <CardHeader>
+        <CardTitle>Team flow</CardTitle>
+        <CardDescription>
+          Current ownership and handoffs completed in the last 30 days
+        </CardDescription>
+        <CardAction>
+          <HelpTip text="A bottleneck risk means the person owns work that is overdue or has remained in the same stage longer than the route target." />
+        </CardAction>
+      </CardHeader>
+      <CardContent className="overflow-x-auto px-0 sm:px-4">
+        <Table>
+          <TableHeader>
+            <TableRow>
+              <TableHead>Person</TableHead>
+              <TableHead>Current work</TableHead>
+              <TableHead>Average age</TableHead>
+              <TableHead>Handoffs · 30d</TableHead>
+              <TableHead>Attention</TableHead>
+              <TableHead>Oldest item</TableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {rows.map((row) => (
+              <TableRow
+                key={row.person.id}
+                className={row.oldest ? 'cursor-pointer' : ''}
+                onClick={() => row.oldest && onOpen(row.oldest.id)}
+              >
+                <TableCell>
+                  <div className="flex items-center gap-2.5">
+                    <Avatar person={row.person} />
+                    <span className="font-medium">{row.person.name}</span>
+                  </div>
+                </TableCell>
+                <TableCell>{row.assigned.length}</TableCell>
+                <TableCell>{formatFlowAge(row.averageAge)}</TableCell>
+                <TableCell>{row.handoffs}</TableCell>
+                <TableCell>
+                  {row.stalled || row.overdue ? (
+                    <Badge variant="destructive">
+                      {row.stalled} stalled · {row.overdue} overdue
+                    </Badge>
+                  ) : (
+                    <Badge variant="secondary">On track</Badge>
+                  )}
+                </TableCell>
+                <TableCell className="max-w-64">
+                  <p className="truncate text-sm font-medium">
+                    {row.oldest?.title ?? '—'}
+                  </p>
+                  {row.oldest && (
+                    <p className="mt-1 text-xs text-muted-foreground">
+                      {row.oldest.stage} ·{' '}
+                      {formatFlowAge(stageAgeHours(row.oldest))}
+                    </p>
+                  )}
+                </TableCell>
+              </TableRow>
+            ))}
+          </TableBody>
+        </Table>
+      </CardContent>
+    </Card>
   );
 }
 
@@ -2365,20 +2577,14 @@ function Pipeline({
   items,
   roles,
   person,
-  canImport,
   onOpen,
   onMove,
-  onImport,
-  onExport,
 }: {
   items: ContentItem[];
   roles: AppRole[];
   person: Person;
-  canImport: boolean;
   onOpen: (id: string) => void;
   onMove: (item: ContentItem, stage: Stage) => void;
-  onImport: (file: File) => void;
-  onExport: () => void;
 }) {
   const stageStyles = [
     'border-t-[#77809b] bg-[var(--pipeline-neutral)]',
@@ -2402,42 +2608,13 @@ function Pipeline({
   ];
   return (
     <>
-      <div className="mb-6 flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
-        <PageTitle
-          eyebrow="CONTENT PIPELINE"
-          title="Six headings. Every departmental checkpoint."
-          description="Research, compliance, creative approvals, publishing and reporting stay visible inside the six stages your team already knows."
-        />
-        <div className="mb-7 flex flex-wrap items-center justify-end gap-2">
-          {canImport && (
-            <label className="inline-flex h-9 cursor-pointer items-center gap-2 rounded-md border border-border bg-card px-3 text-sm font-medium text-card-foreground shadow-sm hover:bg-muted">
-              <FileUp className="size-4" /> Import calendar
-              <input
-                type="file"
-                accept=".xlsx"
-                className="sr-only"
-                onChange={(event) => {
-                  const file = event.target.files?.[0];
-                  if (file) onImport(file);
-                  event.currentTarget.value = '';
-                }}
-              />
-            </label>
-          )}
-          <Button variant="outline" size="sm" onClick={onExport}>
-            <FileDown /> Export Excel
-          </Button>
-        </div>
-      </div>
-      <Alert className="mb-4 border-border bg-card">
-        <GripVertical />
-        <AlertTitle>Every move is confirmed</AlertTitle>
-        <AlertDescription>
-          Full production uses all six stages. Posts and carousels can use the
-          design route. Same-day requests enter the amber ad hoc checkpoint
-          before Upload.
-        </AlertDescription>
-      </Alert>
+      <PageTitle
+        eyebrow="WORK"
+        title="Content pipeline"
+        action={
+          <HelpTip text="Full production uses all six stages. Design work moves from Idea to Production. Same-day work enters the amber ad hoc checkpoint before Upload." />
+        }
+      />
       <div className="-mx-4 overflow-x-auto px-4 pb-4 sm:-mx-7 sm:px-7 lg:-mx-10 lg:px-10">
         <div className="grid min-w-max grid-cols-7 gap-4">
           {columns.map((column) => {
@@ -2504,6 +2681,8 @@ function Pipeline({
                         comment.kind === 'Feedback' &&
                         !comment.resolved,
                     ).length;
+                    const ageHours = stageAgeHours(item);
+                    const stalled = isFlowStalled(item);
                     return (
                       <article
                         key={item.id}
@@ -2551,6 +2730,11 @@ function Pipeline({
                               {openFeedback} open feedback
                             </Badge>
                           )}
+                          {stalled && (
+                            <Badge variant="destructive">
+                              <AlertTriangle /> Bottleneck risk
+                            </Badge>
+                          )}
                         </div>
                         <div className="mt-3 rounded-lg bg-muted px-2.5 py-2">
                           <p className="text-[11px] font-semibold uppercase tracking-wide text-[var(--warning-foreground)]">
@@ -2562,12 +2746,23 @@ function Pipeline({
                         </div>
                         <div className="mt-4 flex items-center justify-between gap-2">
                           <Owners people={item.accountable} />
-                          <span
-                            className={`flex items-center gap-1 text-xs ${isOverdue(item) ? 'font-semibold text-[var(--danger-foreground)]' : 'text-muted-foreground'}`}
-                          >
-                            <Clock3 className="size-3.5" />
-                            {dueLabel(item)}
-                          </span>
+                          <div className="text-right text-xs">
+                            <span
+                              className={`flex items-center justify-end gap-1 ${isOverdue(item) ? 'font-semibold text-[var(--danger-foreground)]' : 'text-muted-foreground'}`}
+                            >
+                              <Clock3 className="size-3.5" />
+                              {dueLabel(item)}
+                            </span>
+                            <span
+                              className={
+                                stalled
+                                  ? 'font-medium text-[var(--danger-foreground)]'
+                                  : 'text-muted-foreground'
+                              }
+                            >
+                              {formatFlowAge(ageHours)} in {item.stage}
+                            </span>
+                          </div>
                         </div>
                         {next && (
                           <Button
@@ -2793,164 +2988,245 @@ function RaciPeople({ people }: { people: Person[] }) {
 
 function ContentCalendar({
   items,
-  cadences,
-  cadenceRuns,
+  importBatches,
+  canImport,
+  onImport,
+  onExport,
   onOpen,
 }: {
   items: ContentItem[];
-  cadences: OperatingCadence[];
-  cadenceRuns: CadenceRun[];
+  importBatches: CalendarImportBatch[];
+  canImport: boolean;
+  onImport: (file: File) => void;
+  onExport: () => void;
   onOpen: (id: string) => void;
 }) {
+  const [month, setMonth] = useState(() => {
+    const today = localDateKey(new Date());
+    return new Date(`${today.slice(0, 7)}-01T12:00:00+05:30`);
+  });
   const scheduled = [...items]
     .filter((item) => item.lifecycle === 'Active' && item.dueAt)
     .sort((a, b) => (a.dueAt ?? '').localeCompare(b.dueAt ?? ''));
-  const dayKeys = Array.from({ length: 7 }, (_, index) => {
-    const date = new Date();
-    date.setDate(date.getDate() + index);
-    return localDateKey(date);
-  });
-  const upcomingCadence = getCadenceOccurrences(cadences, 14).slice(0, 8);
+  const monthKey = localDateKey(month).slice(0, 7);
+  const [year, monthNumber] = monthKey.split('-').map(Number);
+  const firstDay = new Date(`${monthKey}-01T12:00:00+05:30`);
+  const mondayOffset = (firstDay.getUTCDay() + 6) % 7;
+  const daysInMonth = new Date(Date.UTC(year, monthNumber, 0)).getUTCDate();
+  const cells: Array<string | null> = [
+    ...Array.from({ length: mondayOffset }, () => null),
+    ...Array.from(
+      { length: daysInMonth },
+      (_, index) => `${monthKey}-${String(index + 1).padStart(2, '0')}`,
+    ),
+  ];
+  while (cells.length % 7) cells.push(null);
+  const monthItems = scheduled.filter((item) =>
+    localDateKey(new Date(item.dueAt as string)).startsWith(monthKey),
+  );
+  const moveMonth = (offset: number) => {
+    const nextMonth = monthNumber - 1 + offset;
+    setMonth(
+      new Date(
+        `${new Date(Date.UTC(year, nextMonth, 1)).toISOString().slice(0, 7)}-01T12:00:00+05:30`,
+      ),
+    );
+  };
+  const resetMonth = () => {
+    const today = localDateKey(new Date());
+    setMonth(new Date(`${today.slice(0, 7)}-01T12:00:00+05:30`));
+  };
   return (
     <>
       <PageTitle
-        eyebrow="CONTENT CALENDAR"
-        title="See the week before it becomes urgent."
-        description="Due dates, platforms and content mix sit in one schedule. Every date uses Asia/Kolkata."
+        eyebrow="PLAN"
+        title="Content calendar"
+        action={
+          <div className="flex flex-wrap justify-end gap-2">
+            {canImport && (
+              <label className="inline-flex h-9 cursor-pointer items-center gap-2 rounded-md border border-border bg-card px-3 text-sm font-medium text-card-foreground shadow-sm hover:bg-muted">
+                <FileUp className="size-4" /> Import month
+                <input
+                  type="file"
+                  accept=".xlsx"
+                  className="sr-only"
+                  onChange={(event) => {
+                    const file = event.target.files?.[0];
+                    if (file) onImport(file);
+                    event.currentTarget.value = '';
+                  }}
+                />
+              </label>
+            )}
+            <Button variant="outline" size="sm" onClick={onExport}>
+              <FileDown /> Export Excel
+            </Button>
+            <HelpTip text="Admins can upload the existing monthly Excel format. Matching rows are skipped, so the same file can be checked again safely." />
+          </div>
+        }
       />
-      <div className="mb-5 grid grid-cols-2 gap-2 sm:grid-cols-4 xl:grid-cols-7">
-        {dayKeys.map((key, index) => {
-          const count = scheduled.filter((item) =>
-            item.dueAt?.startsWith(key),
-          ).length;
-          const date = new Date(`${key}T12:00:00+05:30`);
-          return (
-            <div
-              key={key}
-              className={`rounded-xl border p-3 ${index === 0 ? 'border-[#dfa126] bg-[var(--warning-subtle)]' : 'border-border bg-card'}`}
-            >
-              <p className="text-xs font-medium text-muted-foreground">
-                {new Intl.DateTimeFormat('en-IN', {
-                  weekday: 'short',
-                  timeZone: 'Asia/Kolkata',
-                }).format(date)}
-              </p>
-              <div className="mt-1 flex items-end justify-between">
-                <p className="font-display text-2xl font-semibold text-card-foreground">
-                  {new Intl.DateTimeFormat('en-IN', {
-                    day: 'numeric',
-                    timeZone: 'Asia/Kolkata',
-                  }).format(date)}
-                </p>
-                <Badge
-                  className={
-                    count
-                      ? 'bg-[#1f2342] text-white'
-                      : 'bg-muted text-muted-foreground'
-                  }
-                >
-                  {count}
-                </Badge>
-              </div>
-            </div>
-          );
-        })}
-      </div>
       <Card className="bg-card">
-        <CardHeader>
-          <CardTitle>Upcoming schedule</CardTitle>
-          <CardDescription>
-            {scheduled.length} active deadlines, ordered by time
-          </CardDescription>
+        <CardHeader className="flex-row items-center justify-between gap-3">
+          <div>
+            <CardTitle>
+              {new Intl.DateTimeFormat('en-IN', {
+                month: 'long',
+                year: 'numeric',
+                timeZone: 'Asia/Kolkata',
+              }).format(month)}
+            </CardTitle>
+            <CardDescription>
+              {monthItems.length} scheduled items
+            </CardDescription>
+          </div>
+          <div className="flex items-center gap-1">
+            <Button variant="ghost" size="sm" onClick={resetMonth}>
+              Today
+            </Button>
+            <Button
+              variant="outline"
+              size="icon-sm"
+              aria-label="Previous month"
+              onClick={() => moveMonth(-1)}
+            >
+              <ChevronLeft />
+            </Button>
+            <Button
+              variant="outline"
+              size="icon-sm"
+              aria-label="Next month"
+              onClick={() => moveMonth(1)}
+            >
+              <ChevronRight />
+            </Button>
+          </div>
         </CardHeader>
         <CardContent className="overflow-x-auto px-0 sm:px-4">
-          <Table>
-            <TableHeader>
-              <TableRow>
-                <TableHead>Date & time</TableHead>
-                <TableHead>Content</TableHead>
-                <TableHead>Mix</TableHead>
-                <TableHead>Checkpoint</TableHead>
-                <TableHead>Owner</TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {scheduled.map((item) => (
-                <TableRow
-                  key={item.id}
-                  className="cursor-pointer"
-                  onClick={() => onOpen(item.id)}
+          <div className="min-w-[760px]">
+            <div className="grid grid-cols-7 border-b border-border bg-muted/60">
+              {['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'].map((day) => (
+                <div
+                  key={day}
+                  className="px-2 py-2 text-center text-xs font-semibold text-muted-foreground"
                 >
-                  <TableCell
-                    className={`min-w-32 ${isOverdue(item) ? 'font-semibold text-[var(--danger-foreground)]' : ''}`}
-                  >
-                    {dueLabel(item)}
-                  </TableCell>
-                  <TableCell className="min-w-64">
-                    <p className="font-medium text-card-foreground">
-                      {item.title}
-                    </p>
-                    <p className="mt-1 text-xs text-muted-foreground">
-                      {item.platform} · {item.contentType}
-                    </p>
-                  </TableCell>
-                  <TableCell>
-                    <PillarBadge pillar={item.pillar} />
-                  </TableCell>
-                  <TableCell className="min-w-44">
-                    <p className="text-sm font-medium">{item.workflowStep}</p>
-                    <p className="mt-1 text-xs text-muted-foreground">
-                      {item.stage}
-                    </p>
-                  </TableCell>
-                  <TableCell>
-                    <Owners people={item.responsible} />
-                  </TableCell>
-                </TableRow>
-              ))}
-            </TableBody>
-          </Table>
-        </CardContent>
-      </Card>
-      <Card className="mt-5 bg-card">
-        <CardHeader>
-          <CardTitle>Operating cadence</CardTitle>
-          <CardDescription>
-            Recurring planning, approvals and reporting alongside content
-            deadlines
-          </CardDescription>
-        </CardHeader>
-        <CardContent className="grid gap-3 md:grid-cols-2">
-          {upcomingCadence.map(({ cadence, scheduledFor }) => {
-            const run = cadenceRuns.find(
-              (entry) =>
-                entry.cadenceId === cadence.id &&
-                entry.scheduledFor === scheduledFor,
-            );
-            return (
-              <div
-                key={`${cadence.id}-${scheduledFor}`}
-                className="flex items-start justify-between gap-4 rounded-xl border border-border p-3.5"
-              >
-                <div>
-                  <p className="text-sm font-semibold">{cadence.name}</p>
-                  <p className="mt-1 text-xs text-muted-foreground">
-                    {formatCadenceDate(scheduledFor)} · {cadence.owner.name}
-                  </p>
+                  {day}
                 </div>
-                <Badge
-                  variant={run?.status === 'Complete' ? 'secondary' : 'outline'}
-                >
-                  {run?.status ?? 'Upcoming'}
-                </Badge>
-              </div>
-            );
-          })}
-          {!upcomingCadence.length && (
-            <EmptyState text="No recurring cadence is active for the next two weeks." />
-          )}
+              ))}
+            </div>
+            <div className="grid grid-cols-7 border-l border-border">
+              {cells.map((key, index) => {
+                const dayItems = key
+                  ? monthItems.filter(
+                      (item) =>
+                        localDateKey(new Date(item.dueAt as string)) === key,
+                    )
+                  : [];
+                const today = key === localDateKey(new Date());
+                return (
+                  <div
+                    key={key ?? `blank-${index}`}
+                    className={`min-h-32 border-b border-r border-border p-2 ${key ? 'bg-card' : 'bg-muted/25'}`}
+                  >
+                    {key && (
+                      <>
+                        <div className="mb-2 flex items-center justify-between">
+                          <span
+                            className={`grid size-7 place-items-center rounded-full text-sm font-medium ${today ? 'bg-[#dfa126] text-[#211a08]' : 'text-card-foreground'}`}
+                          >
+                            {Number(key.slice(-2))}
+                          </span>
+                          {dayItems.length > 0 && (
+                            <span className="text-xs text-muted-foreground">
+                              {dayItems.length}
+                            </span>
+                          )}
+                        </div>
+                        <div className="space-y-1.5">
+                          {dayItems.slice(0, 3).map((item) => (
+                            <button
+                              key={item.id}
+                              onClick={() => onOpen(item.id)}
+                              className={`w-full rounded-md border px-2 py-1.5 text-left text-xs transition hover:border-[#dfa126] ${item.workflowRoute === 'Ad hoc fast track' ? 'border-[#dfa126]/55 bg-[var(--warning-subtle)]' : 'border-border bg-muted/65'}`}
+                            >
+                              <span className="block truncate font-medium">
+                                {item.title}
+                              </span>
+                              <span className="mt-0.5 block truncate text-[11px] text-muted-foreground">
+                                {item.platform} · {item.stage}
+                              </span>
+                            </button>
+                          ))}
+                          {dayItems.length > 3 && (
+                            <p className="px-1 text-xs font-medium text-[var(--warning-foreground)]">
+                              +{dayItems.length - 3} more
+                            </p>
+                          )}
+                        </div>
+                      </>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          </div>
         </CardContent>
       </Card>
+      {canImport && (
+        <Collapsible>
+          <Card className="mt-5 bg-card">
+            <CollapsibleTrigger className="flex w-full items-center justify-between gap-3 px-6 py-4 text-left">
+              <div>
+                <p className="font-semibold text-card-foreground">
+                  Monthly imports
+                </p>
+                <p className="mt-1 text-sm text-muted-foreground">
+                  {importBatches.length
+                    ? `${importBatches.length} recent uploads recorded`
+                    : 'No upload recorded yet'}
+                </p>
+              </div>
+              <ChevronDown className="size-4 text-muted-foreground" />
+            </CollapsibleTrigger>
+            <CollapsibleContent>
+              <CardContent className="border-t border-border pt-4">
+                <div className="space-y-2">
+                  {importBatches.slice(0, 6).map((batch) => (
+                    <div
+                      key={batch.id}
+                      className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-border p-3"
+                    >
+                      <div>
+                        <p className="text-sm font-medium">
+                          {batch.sourceName}
+                        </p>
+                        <p className="mt-1 text-xs text-muted-foreground">
+                          {new Intl.DateTimeFormat('en-IN', {
+                            dateStyle: 'medium',
+                            timeStyle: 'short',
+                            timeZone: 'Asia/Kolkata',
+                          }).format(new Date(batch.importedAt))}{' '}
+                          · {batch.importedBy.name}
+                        </p>
+                      </div>
+                      <div className="text-right text-sm">
+                        <p className="font-medium">
+                          {batch.importedCount} added
+                        </p>
+                        <p className="text-xs text-muted-foreground">
+                          {batch.skippedCount} matching rows skipped
+                        </p>
+                      </div>
+                    </div>
+                  ))}
+                  {!importBatches.length && (
+                    <EmptyState text="Upload the team's monthly calendar when it is ready." />
+                  )}
+                </div>
+              </CardContent>
+            </CollapsibleContent>
+          </Card>
+        </Collapsible>
+      )}
     </>
   );
 }
@@ -4001,52 +4277,134 @@ function People({
   onInvitePerson: (person: Person) => void;
   onManage: (person: Person, active: boolean, roles: AppRole[]) => void;
 }) {
-  const owners = people.filter((person) => person.roles.includes('Owner'));
+  const [selectedPersonId, setSelectedPersonId] = useState<string>();
+  const selectedPerson = people.find(
+    (person) => person.id === selectedPersonId,
+  );
   return (
     <>
       <PageTitle
         eyebrow="PEOPLE & ACCESS"
-        title="Give each person only what they need."
-        description="The full operating team stays visible even before they receive a login. Owners and Admins can invite; only Aditi can activate, pause or change access."
+        title="Team access"
         action={
-          <Button onClick={onInvite}>
-            <Plus /> Invite teammate
-          </Button>
+          <div className="flex items-center gap-2">
+            {demoMode && <Badge variant="outline">Demo data</Badge>}
+            <HelpTip text="Aditi is the protected Owner. Admins may invite teammates, while only the Owner can activate accounts or change roles." />
+            <Button onClick={onInvite}>
+              <Plus /> Invite teammate
+            </Button>
+          </div>
         }
       />
-      <div className="mb-5 grid gap-4 lg:grid-cols-[1fr_1.3fr]">
-        <Alert className="border-[#dfa126]/40 bg-[var(--warning-subtle)] text-[var(--warning-foreground)]">
-          <ShieldCheck />
-          <AlertTitle>{owners.length}/1 protected Owner account</AlertTitle>
-          <AlertDescription>
-            Aditi has unrestricted access and is the only person who can grant
-            or change app access. Admins run content operations and may send an
-            invitation, but the invited account remains pending until Aditi
-            assigns its responsibilities.
-          </AlertDescription>
-        </Alert>
-        {demoMode && (
-          <Alert className="border-border bg-card">
-            <UserRound />
-            <AlertTitle>Demonstration team</AlertTitle>
-            <AlertDescription>
-              Changes work in this preview only. After Supabase is connected,
-              signed-in users appear here and Owner changes persist.
-            </AlertDescription>
-          </Alert>
-        )}
-      </div>
-      <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
-        {people.map((person) => (
-          <AccessCard
-            key={`${person.id}-${person.hasLogin}-${person.isActive}-${person.roles.join(':')}`}
-            person={person}
-            canManage={canManageAccess}
-            onInvite={() => onInvitePerson(person)}
-            onManage={onManage}
-          />
-        ))}
-      </div>
+      <Card className="overflow-hidden bg-card">
+        <CardContent className="overflow-x-auto p-0">
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead>Person</TableHead>
+                <TableHead>Responsibility</TableHead>
+                <TableHead>Role</TableHead>
+                <TableHead>Access</TableHead>
+                <TableHead className="w-20 text-right">Details</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {people.map((person) => (
+                <TableRow
+                  key={`${person.id}-${person.hasLogin}-${person.isActive}-${person.roles.join(':')}`}
+                  className="cursor-pointer"
+                  onClick={() => setSelectedPersonId(person.id)}
+                >
+                  <TableCell className="min-w-52">
+                    <div className="flex items-center gap-3">
+                      <Avatar person={person} />
+                      <div>
+                        <p className="font-medium text-card-foreground">
+                          {person.name}
+                        </p>
+                        <p className="mt-0.5 text-xs text-muted-foreground">
+                          {person.email || 'Email not added'}
+                        </p>
+                      </div>
+                    </div>
+                  </TableCell>
+                  <TableCell className="max-w-sm text-sm text-muted-foreground">
+                    <span className="line-clamp-2">
+                      {person.responsibility || 'Responsibility to be assigned'}
+                    </span>
+                  </TableCell>
+                  <TableCell>
+                    <div className="flex min-w-40 flex-wrap gap-1.5">
+                      {person.roles.map((role) => (
+                        <Badge
+                          key={role}
+                          variant={role === 'Owner' ? 'default' : 'outline'}
+                        >
+                          {role}
+                        </Badge>
+                      ))}
+                    </div>
+                  </TableCell>
+                  <TableCell>
+                    <Badge
+                      variant={
+                        person.isActive === false || !person.hasLogin
+                          ? 'outline'
+                          : 'secondary'
+                      }
+                    >
+                      {!person.hasLogin
+                        ? 'Not invited'
+                        : person.isActive === false
+                          ? 'Paused'
+                          : 'Active'}
+                    </Badge>
+                  </TableCell>
+                  <TableCell className="text-right">
+                    <Button
+                      variant="ghost"
+                      size="icon-sm"
+                      aria-label={`Open ${person.name}`}
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        setSelectedPersonId(person.id);
+                      }}
+                    >
+                      <ChevronRight />
+                    </Button>
+                  </TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        </CardContent>
+      </Card>
+      <Sheet
+        open={Boolean(selectedPerson)}
+        onOpenChange={(open) => !open && setSelectedPersonId(undefined)}
+      >
+        <SheetContent
+          side="right"
+          className="w-full overflow-y-auto sm:max-w-lg"
+        >
+          <SheetHeader className="border-b border-border pr-12">
+            <SheetTitle>Person and access</SheetTitle>
+            <SheetDescription>
+              Review responsibilities, invitation status and app permissions.
+            </SheetDescription>
+          </SheetHeader>
+          {selectedPerson && (
+            <div className="p-4 pt-0">
+              <AccessCard
+                person={selectedPerson}
+                canManage={canManageAccess}
+                onInvite={() => onInvitePerson(selectedPerson)}
+                onManage={onManage}
+              />
+            </div>
+          )}
+        </SheetContent>
+      </Sheet>
     </>
   );
 }
@@ -4133,12 +4491,18 @@ function AccessCard({
             <Button
               className="mt-4 w-full"
               disabled={(active && roles.length === 0) || !person.hasLogin}
-              onClick={() => onManage(person, person.hasLogin ? active : false, roles)}
+              onClick={() =>
+                onManage(person, person.hasLogin ? active : false, roles)
+              }
             >
               {person.hasLogin ? 'Save access' : 'Save after invitation'}
             </Button>
             {!person.hasLogin && (
-              <Button variant="outline" className="mt-2 w-full" onClick={onInvite}>
+              <Button
+                variant="outline"
+                className="mt-2 w-full"
+                onClick={onInvite}
+              >
                 <Send /> Add email & invite
               </Button>
             )}
@@ -4178,112 +4542,331 @@ function AccessCard({
     </Card>
   );
 }
-function Settings({ demoMode }: { demoMode: boolean }) {
+function Settings({
+  demoMode,
+  raci,
+  canManage,
+  onEditRaci,
+  cadences,
+  cadenceRuns,
+  currentPerson,
+  onCreateCadence,
+  onEditCadence,
+  onToggleCadence,
+  onCompleteCadence,
+}: {
+  demoMode: boolean;
+  raci: Record<Stage, RaciAssignment>;
+  canManage: boolean;
+  onEditRaci: (stage: Stage) => void;
+  cadences: OperatingCadence[];
+  cadenceRuns: CadenceRun[];
+  currentPerson: Person;
+  onCreateCadence: () => void;
+  onEditCadence: (cadence: OperatingCadence) => void;
+  onToggleCadence: (cadence: OperatingCadence) => void;
+  onCompleteCadence: (cadence: OperatingCadence, scheduledFor: string) => void;
+}) {
   const [hours, setHours] = useState(24);
   const [savedHours, setSavedHours] = useState(24);
   const integrations = [
-    { name: 'Zoho Social', use: 'Social publishing and community management' },
+    {
+      name: 'Zoho Social',
+      use: 'Publishing and post-performance source',
+      status: 'Schema ready',
+    },
     {
       name: 'Zoho Analytics',
-      use: 'Performance reporting outside this tracker',
+      use: 'Future automated post-upload metrics feed',
+      status: 'Schema ready',
     },
-    { name: 'ChatCut', use: 'Long-video clipping assistance' },
+    {
+      name: 'Resend',
+      use: 'Invitation and notification delivery',
+      status: 'Awaiting API key',
+    },
   ];
+  const upcoming = getCadenceOccurrences(cadences, 45).slice(0, 3);
   return (
     <>
       <PageTitle
-        eyebrow="SETTINGS & CONNECTIONS"
-        title="Simple defaults. Connect tools when ready."
-        description="The operating workflow works natively now; external services can be connected later without changing the team’s process."
+        eyebrow="WORKSPACE"
+        title="Settings"
+        action={
+          demoMode ? <Badge variant="outline">Demo data</Badge> : undefined
+        }
       />
-      <div className="grid gap-5 xl:grid-cols-[.8fr_1.2fr]">
-        <div className="space-y-5">
-          <Card className="bg-card">
-            <CardHeader>
-              <CardTitle>Due-date reminders</CardTitle>
-              <CardDescription>Default lead time for new items</CardDescription>
-            </CardHeader>
-            <CardContent>
-              <Label className="mb-2">Hours before due date</Label>
-              <div className="flex max-w-xs gap-2">
-                <Input
-                  type="number"
-                  min="0"
-                  max="720"
-                  value={hours}
-                  onChange={(event) => setHours(Number(event.target.value))}
-                />
-                <Button onClick={() => setSavedHours(hours)}>Save</Button>
-              </div>
-              <p className="mt-3 text-xs text-muted-foreground">
-                {savedHours} hours is saved for new items. Each content item can
-                override it.
-              </p>
-            </CardContent>
-          </Card>
-          <Card className="bg-card">
-            <CardHeader>
-              <CardTitle>Workspace</CardTitle>
-            </CardHeader>
-            <CardContent className="space-y-3 text-sm">
-              <div className="flex justify-between gap-4">
-                <span className="text-muted-foreground">Time zone</span>
-                <strong>Asia/Kolkata</strong>
-              </div>
-              <div className="flex justify-between gap-4">
-                <span className="text-muted-foreground">Owner IDs</span>
-                <strong>1 protected Owner · Aditi</strong>
-              </div>
-              <div className="flex justify-between gap-4">
-                <span className="text-muted-foreground">Authentication</span>
-                <strong>Email + password</strong>
-              </div>
-            </CardContent>
-          </Card>
-        </div>
+      <div className="space-y-5">
         <Card className="bg-card">
-          <CardHeader>
-            <CardTitle>Integration centre</CardTitle>
-            <CardDescription>
-              Prepared connection points; credentials are not stored in the
-              browser.
-            </CardDescription>
-          </CardHeader>
-          <CardContent className="space-y-3">
-            {integrations.map((integration) => (
-              <div
-                key={integration.name}
-                className="flex items-center justify-between gap-4 rounded-xl border border-border p-3.5"
-              >
-                <div>
-                  <p className="text-sm font-semibold">{integration.name}</p>
-                  <p className="mt-1 text-xs text-muted-foreground">
-                    {integration.use}
-                  </p>
-                </div>
-                <Badge className="shrink-0 bg-[var(--warning-subtle)] text-[var(--warning-foreground)]">
-                  Ready to connect
-                </Badge>
-              </div>
-            ))}
-            <div className="mt-3 rounded-xl bg-muted p-4">
+          <CardHeader className="flex-row items-start justify-between gap-4">
+            <div>
               <div className="flex items-center gap-2">
-                <span className="size-2 rounded-full bg-[#dfa126]" />
-                <p className="text-sm font-semibold">Resend email delivery</p>
+                <CardTitle>Workflow ownership (RACI)</CardTitle>
+                <HelpTip text="These are the agreed default owners for each stage. Changes update active work and become the starting point for future content." />
               </div>
-              <p className="mt-2 text-sm text-muted-foreground">
-                Approval, feedback and due-date messages use
-                notifications@updates.buildablelabs.com. Add the Resend API key
-                in the backend before enabling delivery.
-              </p>
-              {demoMode && (
-                <Badge className="mt-3 bg-muted text-card-foreground">
-                  Demonstration data active
-                </Badge>
-              )}
+              <CardDescription className="mt-1">
+                The team brief, kept as a workspace setting.
+              </CardDescription>
             </div>
+          </CardHeader>
+          <CardContent className="overflow-x-auto px-0 sm:px-4">
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>Stage</TableHead>
+                  <TableHead>Responsible</TableHead>
+                  <TableHead>Accountable</TableHead>
+                  <TableHead>Consulted</TableHead>
+                  <TableHead>Informed</TableHead>
+                  {canManage && (
+                    <TableHead className="text-right">Action</TableHead>
+                  )}
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {PIPELINE.map((stage) => (
+                  <TableRow key={stage}>
+                    <TableCell className="font-semibold">{stage}</TableCell>
+                    <TableCell>
+                      <RaciPeople people={raci[stage].responsible} />
+                    </TableCell>
+                    <TableCell>
+                      <RaciPeople people={raci[stage].accountable} />
+                    </TableCell>
+                    <TableCell>
+                      <RaciPeople people={raci[stage].consulted} />
+                    </TableCell>
+                    <TableCell>
+                      <RaciPeople people={raci[stage].informed} />
+                    </TableCell>
+                    {canManage && (
+                      <TableCell className="text-right">
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          onClick={() => onEditRaci(stage)}
+                        >
+                          Edit
+                        </Button>
+                      </TableCell>
+                    )}
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
           </CardContent>
         </Card>
+
+        <Collapsible>
+          <Card className="bg-card">
+            <div className="flex items-center gap-2 pr-4">
+              <CollapsibleTrigger className="flex flex-1 items-center justify-between gap-4 px-6 py-5 pr-2 text-left">
+                <div>
+                  <p className="font-semibold text-card-foreground">
+                    Operating cadence
+                  </p>
+                  <p className="mt-1 text-sm text-muted-foreground">
+                    {cadences.filter((cadence) => cadence.active).length} active
+                    recurring checkpoints
+                  </p>
+                </div>
+                <ChevronDown className="size-4 text-muted-foreground" />
+              </CollapsibleTrigger>
+              <HelpTip text="A cadence is only a recurring reminder for a team checkpoint, such as the weekly content review. It does not create another workflow and can stay paused if the team does not need it." />
+            </div>
+            <CollapsibleContent>
+              <CardContent className="border-t border-border pt-5">
+                <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+                  <p className="text-sm text-muted-foreground">
+                    Keep only the meetings or handoff checks the team actually
+                    uses.
+                  </p>
+                  {canManage && (
+                    <Button size="sm" onClick={onCreateCadence}>
+                      <Plus /> Add cadence
+                    </Button>
+                  )}
+                </div>
+                <div className="space-y-2">
+                  {cadences.map((cadence) => (
+                    <div
+                      key={cadence.id}
+                      className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-border p-3.5"
+                    >
+                      <div>
+                        <div className="flex flex-wrap items-center gap-2">
+                          <p className="text-sm font-semibold">
+                            {cadence.name}
+                          </p>
+                          <Badge
+                            variant={cadence.active ? 'secondary' : 'outline'}
+                          >
+                            {cadence.active ? 'Active' : 'Paused'}
+                          </Badge>
+                        </div>
+                        <p className="mt-1 text-xs text-muted-foreground">
+                          {cadenceScheduleLabel(cadence)} · {cadence.owner.name}
+                        </p>
+                      </div>
+                      {canManage && (
+                        <div className="flex gap-2">
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            onClick={() => onEditCadence(cadence)}
+                          >
+                            Edit
+                          </Button>
+                          <Button
+                            size="sm"
+                            variant="ghost"
+                            onClick={() => onToggleCadence(cadence)}
+                          >
+                            {cadence.active ? 'Pause' : 'Activate'}
+                          </Button>
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                  {!cadences.length && (
+                    <EmptyState text="No recurring checkpoint is configured." />
+                  )}
+                </div>
+                {upcoming.length > 0 && (
+                  <div className="mt-5 border-t border-border pt-4">
+                    <p className="mb-3 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                      Next checkpoints
+                    </p>
+                    <div className="space-y-2">
+                      {upcoming.map(({ cadence, scheduledFor }) => {
+                        const completed = cadenceRuns.some(
+                          (run) =>
+                            run.cadenceId === cadence.id &&
+                            run.scheduledFor === scheduledFor &&
+                            run.status === 'Complete',
+                        );
+                        const canComplete =
+                          canManage ||
+                          cadence.owner.id === currentPerson.id ||
+                          cadence.participants.some(
+                            (person) => person.id === currentPerson.id,
+                          );
+                        return (
+                          <div
+                            key={`${cadence.id}-${scheduledFor}`}
+                            className="flex flex-wrap items-center justify-between gap-3 rounded-lg bg-muted p-3 text-sm"
+                          >
+                            <span>
+                              <strong>{cadence.name}</strong> ·{' '}
+                              {formatCadenceDate(scheduledFor)}
+                            </span>
+                            {completed ? (
+                              <Badge variant="secondary">Complete</Badge>
+                            ) : canComplete ? (
+                              <Button
+                                size="sm"
+                                variant="outline"
+                                onClick={() =>
+                                  onCompleteCadence(cadence, scheduledFor)
+                                }
+                              >
+                                <Check /> Mark complete
+                              </Button>
+                            ) : (
+                              <Badge variant="outline">Upcoming</Badge>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
+              </CardContent>
+            </CollapsibleContent>
+          </Card>
+        </Collapsible>
+
+        <div className="grid gap-5 xl:grid-cols-2">
+          <Card className="bg-card">
+            <CardHeader>
+              <CardTitle>Workspace defaults</CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-5">
+              <div>
+                <Label className="mb-2">Default reminder lead time</Label>
+                <div className="flex max-w-xs gap-2">
+                  <Input
+                    type="number"
+                    min="0"
+                    max="720"
+                    value={hours}
+                    onChange={(event) => setHours(Number(event.target.value))}
+                  />
+                  <Button onClick={() => setSavedHours(hours)}>Save</Button>
+                </div>
+                <p className="mt-2 text-xs text-muted-foreground">
+                  {savedHours} hours before the due date
+                </p>
+              </div>
+              <div className="grid gap-3 border-t border-border pt-4 text-sm sm:grid-cols-3">
+                <div>
+                  <p className="text-muted-foreground">Time zone</p>
+                  <strong>Asia/Kolkata</strong>
+                </div>
+                <div>
+                  <p className="text-muted-foreground">Owner</p>
+                  <strong>Aditi</strong>
+                </div>
+                <div>
+                  <p className="text-muted-foreground">Authentication</p>
+                  <strong>Email + password</strong>
+                </div>
+              </div>
+            </CardContent>
+          </Card>
+          <Collapsible>
+            <Card className="bg-card">
+              <CollapsibleTrigger className="flex w-full items-center justify-between gap-4 px-6 py-5 text-left">
+                <div>
+                  <p className="font-semibold text-card-foreground">
+                    Integrations
+                  </p>
+                  <p className="mt-1 text-sm text-muted-foreground">
+                    Zoho-ready backend and email delivery
+                  </p>
+                </div>
+                <ChevronDown className="size-4 text-muted-foreground" />
+              </CollapsibleTrigger>
+              <CollapsibleContent>
+                <CardContent className="space-y-3 border-t border-border pt-5">
+                  {integrations.map((integration) => (
+                    <div
+                      key={integration.name}
+                      className="flex items-center justify-between gap-4 rounded-xl border border-border p-3.5"
+                    >
+                      <div>
+                        <p className="text-sm font-semibold">
+                          {integration.name}
+                        </p>
+                        <p className="mt-1 text-xs text-muted-foreground">
+                          {integration.use}
+                        </p>
+                      </div>
+                      <Badge variant="outline" className="shrink-0">
+                        {integration.status}
+                      </Badge>
+                    </div>
+                  ))}
+                  <p className="text-xs leading-relaxed text-muted-foreground">
+                    Metrics remain outside the navigation until Zoho is
+                    connected. The database already supports external mappings
+                    and sync runs.
+                  </p>
+                </CardContent>
+              </CollapsibleContent>
+            </Card>
+          </Collapsible>
+        </div>
       </div>
     </>
   );
@@ -4399,7 +4982,9 @@ function ItemDetail({
                 </p>
                 <div className="grid gap-2">
                   {visibleSteps.map((step, index) => {
-                    const currentIndex = visibleSteps.indexOf(item.workflowStep);
+                    const currentIndex = visibleSteps.indexOf(
+                      item.workflowStep,
+                    );
                     const complete = index < currentIndex;
                     const active = step === item.workflowStep;
                     return (
@@ -4698,7 +5283,6 @@ function ItemDetail({
                 ))}
               </div>
             </TabsContent>
-
           </Tabs>
         </div>
 
@@ -4936,33 +5520,36 @@ function MetricsDialog({
   );
 }
 
-function RaciDialog({
-  intent,
+function RaciDefaultDialog({
+  stage,
+  assignment,
   people,
   onOpenChange,
   onSave,
 }: {
-  intent?: RaciIntent;
+  stage?: Stage;
+  assignment?: RaciAssignment;
   people: Person[];
   onOpenChange: (open: boolean) => void;
-  onSave: (item: ContentItem, stage: Stage, assignment: RaciAssignment) => void;
+  onSave: (stage: Stage, assignment: RaciAssignment) => void;
 }) {
   return (
-    <Dialog open={Boolean(intent)} onOpenChange={onOpenChange}>
+    <Dialog open={Boolean(stage && assignment)} onOpenChange={onOpenChange}>
       <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-3xl">
         <DialogHeader>
-          <DialogTitle>{intent?.stage} RACI assignments</DialogTitle>
-          <DialogDescription>{intent?.item.title}</DialogDescription>
+          <DialogTitle>{stage} workflow ownership</DialogTitle>
+          <DialogDescription>
+            This default is applied to active content and future items at this
+            stage.
+          </DialogDescription>
         </DialogHeader>
-        {intent && (
+        {stage && assignment && (
           <RaciEditor
-            key={`${intent.item.id}-${intent.stage}`}
-            assignment={raciFor(intent.item, intent.stage)}
+            key={stage}
+            assignment={assignment}
             people={people}
             onCancel={() => onOpenChange(false)}
-            onSave={(assignment) =>
-              onSave(intent.item, intent.stage, assignment)
-            }
+            onSave={(nextAssignment) => onSave(stage, nextAssignment)}
           />
         )}
       </DialogContent>
@@ -5527,8 +6114,8 @@ function CalendarImportDialog({
           </DialogTitle>
           <DialogDescription>
             Active and future rows plus the prior 30 days will be added as
-            separate platform-specific items. Matching rows already imported
-            are skipped.
+            separate platform-specific items. Matching rows already imported are
+            skipped.
           </DialogDescription>
         </DialogHeader>
         <div className="flex flex-wrap gap-2">
@@ -5653,8 +6240,8 @@ function CreateDialog({
             Create content item
           </DialogTitle>
           <DialogDescription>
-            Choose the route. The team’s agreed RACI is applied automatically
-            at every stage; Admin can still adjust a stage later.
+            Choose the route. The team’s agreed RACI is applied automatically at
+            every stage; Admin can still adjust a stage later.
           </DialogDescription>
         </DialogHeader>
         <form onSubmit={submit} className="space-y-4">

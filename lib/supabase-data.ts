@@ -1,6 +1,7 @@
 import type { SupabaseClient, User } from '@supabase/supabase-js';
 import type {
   AppRole,
+  CalendarImportBatch,
   CadenceRun,
   ContentItem,
   ContentPillar,
@@ -61,6 +62,8 @@ export type LiveSnapshot = {
   requests: DepartmentRequest[];
   cadences: OperatingCadence[];
   cadenceRuns: CadenceRun[];
+  raciDefaults: Record<Stage, RaciAssignment>;
+  importBatches: CalendarImportBatch[];
 };
 
 export async function loadLiveSnapshot(
@@ -82,6 +85,8 @@ export async function loadLiveSnapshot(
     cadencesRes,
     cadenceParticipantsRes,
     cadenceRunsRes,
+    raciDefaultsRes,
+    importBatchesRes,
   ] = await Promise.all([
     client
       .from('profiles')
@@ -123,6 +128,12 @@ export async function loadLiveSnapshot(
       .from('cadence_runs')
       .select('*')
       .order('scheduled_for', { ascending: true }),
+    client.from('workflow_raci_defaults').select('*'),
+    client
+      .from('calendar_import_batches')
+      .select('*')
+      .order('created_at', { ascending: false })
+      .limit(12),
   ]);
   const error = [
     profilesRes,
@@ -139,6 +150,8 @@ export async function loadLiveSnapshot(
     cadencesRes,
     cadenceParticipantsRes,
     cadenceRunsRes,
+    raciDefaultsRes,
+    importBatchesRes,
   ].find((result) => result.error)?.error;
   if (error) throw error;
 
@@ -252,6 +265,11 @@ export async function loadLiveSnapshot(
         .map((event) => ({
           action: event.action.replaceAll('_', ' '),
           actor: fallbackPerson(event.actor_id).name,
+          occurredAt: event.created_at,
+          fromStage: event.from_stage
+            ? stageFromDb[event.from_stage]
+            : undefined,
+          toStage: event.to_stage ? stageFromDb[event.to_stage] : undefined,
           at: new Date(event.created_at).toLocaleString('en-IN', {
             timeZone: 'Asia/Kolkata',
             dateStyle: 'medium',
@@ -307,11 +325,34 @@ export async function loadLiveSnapshot(
           followerChange: metric.follower_change,
           notes: metric.notes ?? undefined,
           source:
-            metric.source === 'zoho_analytics' ? 'Zoho Analytics' : 'Manual',
+            metric.source === 'zoho_social'
+              ? 'Zoho Social'
+              : metric.source === 'zoho_analytics'
+                ? 'Zoho Analytics'
+                : 'Manual',
           recordedOn: metric.recorded_on,
         })),
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
     } as ContentItem;
   });
+
+  const emptyRaci = (): RaciAssignment => ({
+    responsible: [],
+    accountable: [],
+    consulted: [],
+    informed: [],
+  });
+  const raciDefaults = Object.fromEntries(
+    Object.values(stageFromDb).map((stage) => [stage, emptyRaci()]),
+  ) as Record<Stage, RaciAssignment>;
+  for (const row of raciDefaultsRes.data ?? []) {
+    const stage = stageFromDb[row.stage];
+    const role = row.assignment_type as keyof RaciAssignment;
+    const person = fallbackPerson(row.profile_id);
+    if (stage && raciDefaults[stage]?.[role])
+      raciDefaults[stage][role].push(person);
+  }
 
   const profile = (profilesRes.data ?? []).find(
     (row) => row.auth_user_id === user.id,
@@ -373,6 +414,19 @@ export async function loadLiveSnapshot(
       : undefined,
     notes: row.notes ?? undefined,
   }));
+  const importBatches: CalendarImportBatch[] = (
+    importBatchesRes.data ?? []
+  ).map((row) => ({
+    id: row.id,
+    sourceName: row.source_name,
+    importedBy: fallbackPerson(row.imported_by),
+    importedAt: row.created_at,
+    rowCount: row.row_count,
+    importedCount: row.imported_count,
+    skippedCount: row.skipped_count,
+    windowStart: row.window_start ?? undefined,
+    windowEnd: row.window_end ?? undefined,
+  }));
   return {
     currentUser,
     currentUserActive: Boolean(profile?.is_active),
@@ -381,5 +435,7 @@ export async function loadLiveSnapshot(
     requests,
     cadences,
     cadenceRuns,
+    raciDefaults,
+    importBatches,
   };
 }

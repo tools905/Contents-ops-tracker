@@ -20,7 +20,10 @@ export type StageStatus =
   | 'Changes requested'
   | 'Approved';
 export type ContentPillar = 'Knowledge' | 'Promotional' | 'AAFM India Insider';
-export type WorkflowRoute = 'Full production' | 'Design route' | 'Ad hoc fast track';
+export type WorkflowRoute =
+  | 'Full production'
+  | 'Design route'
+  | 'Ad hoc fast track';
 
 export const STAGE_STEPS: Record<Stage, readonly string[]> = {
   Idea: ['Topic research', 'HOD input', 'Calendar slot'],
@@ -33,7 +36,11 @@ export const STAGE_STEPS: Record<Stage, readonly string[]> = {
     'Priya final approval',
   ],
   Upload: ['Platform scheduling', 'Publishing'],
-  'Post-Upload': ['Publish confirmation', 'Live link captured', 'Learning note'],
+  'Post-Upload': [
+    'Publish confirmation',
+    'Live link captured',
+    'Learning note',
+  ],
 };
 
 export const ROUTE_STAGES: Record<WorkflowRoute, readonly Stage[]> = {
@@ -42,7 +49,9 @@ export const ROUTE_STAGES: Record<WorkflowRoute, readonly Stage[]> = {
   'Ad hoc fast track': ['Production', 'Upload', 'Post-Upload'],
 };
 
-export function nextRouteStage(item: Pick<ContentItem, 'stage' | 'workflowRoute'>) {
+export function nextRouteStage(
+  item: Pick<ContentItem, 'stage' | 'workflowRoute'>,
+) {
   const route = ROUTE_STAGES[item.workflowRoute];
   const index = route.indexOf(item.stage);
   return index >= 0 ? route[index + 1] : undefined;
@@ -78,6 +87,9 @@ export type HistoryEvent = {
   action: string;
   actor: string;
   at: string;
+  occurredAt?: string;
+  fromStage?: Stage;
+  toStage?: Stage;
   note?: string;
   flagged?: boolean;
 };
@@ -108,7 +120,7 @@ export type MetricEntry = {
   watchTimeMinutes: number;
   followerChange: number;
   notes?: string;
-  source: 'Manual' | 'Zoho Analytics';
+  source: 'Manual' | 'Zoho Social' | 'Zoho Analytics';
   recordedOn: string;
 };
 export type ContentItem = {
@@ -141,6 +153,20 @@ export type ContentItem = {
   comments: Comment[];
   metrics: MetricEntry[];
   publishedAt?: string;
+  createdAt?: string;
+  updatedAt?: string;
+};
+
+export type CalendarImportBatch = {
+  id: string;
+  sourceName: string;
+  importedBy: Person;
+  importedAt: string;
+  rowCount: number;
+  importedCount: number;
+  skippedCount: number;
+  windowStart?: string;
+  windowEnd?: string;
 };
 
 export type CadenceFrequency = 'Weekly' | 'Monthly';

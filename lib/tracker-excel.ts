@@ -13,6 +13,7 @@ type ExcelValue = string | number | boolean | Date | null;
 type InputRow = ExcelValue[];
 
 export type CalendarImportRow = {
+  importSource: string;
   sourceKey: string;
   sourceLabel: string;
   title: string;
@@ -132,6 +133,7 @@ export async function parseMasterCalendar(
       );
       const dateKey = date.toISOString().slice(0, 10);
       imported.push({
+        importSource: file.name,
         sourceKey: [sheet.sheet, dateKey, normalized(title)].join('::'),
         sourceLabel: `${sheet.sheet} master calendar`,
         title,
@@ -142,7 +144,11 @@ export async function parseMasterCalendar(
         workflowRoute: ['Reel', 'Short', 'Video'].includes(contentType)
           ? 'Full production'
           : 'Design route',
-        initialStage: posted ? 'Post-Upload' : readyToPublish ? 'Upload' : 'Idea',
+        initialStage: posted
+          ? 'Post-Upload'
+          : readyToPublish
+            ? 'Upload'
+            : 'Idea',
         initialStep: posted
           ? 'Publish confirmation'
           : readyToPublish
@@ -178,6 +184,21 @@ function names(people: Person[]) {
   return people.map((person) => person.name).join(', ');
 }
 
+function stageAgeHours(item: ContentItem) {
+  const enteredAt = item.history
+    .filter((event) => event.toStage === item.stage && event.occurredAt)
+    .map((event) => new Date(event.occurredAt as string).getTime())
+    .filter(Number.isFinite)
+    .sort((a, b) => b - a)[0];
+  const fallback = new Date(
+    item.updatedAt ?? item.createdAt ?? Date.now(),
+  ).getTime();
+  return Math.max(
+    0,
+    Math.round((Date.now() - (enteredAt ?? fallback)) / 3_600_000),
+  );
+}
+
 export async function exportTrackerWorkbook(input: {
   items: ContentItem[];
   people: Person[];
@@ -185,23 +206,35 @@ export async function exportTrackerWorkbook(input: {
   requests: DepartmentRequest[];
 }) {
   const { default: writeExcelFile } = await import('write-excel-file/browser');
-  const pipelineRows = input.items.map((item) => [
-    item.title,
-    item.contentType,
-    item.platform,
-    item.pillar,
-    item.workflowRoute,
-    item.stage,
-    item.workflowStep,
-    item.status,
-    item.lifecycle,
-    item.dueAt ? new Date(item.dueAt) : null,
-    names(item.responsible),
-    names(item.accountable),
-    item.comments.filter((comment) => comment.kind === 'Feedback' && !comment.resolved)
-      .length,
-    item.sourceLabel ?? '',
-  ]);
+  const pipelineRows = input.items.map((item) => {
+    const ageHours = stageAgeHours(item);
+    const threshold = item.workflowRoute === 'Ad hoc fast track' ? 8 : 48;
+    const overdue = Boolean(
+      item.dueAt && new Date(item.dueAt).getTime() < Date.now(),
+    );
+    return [
+      item.title,
+      item.contentType,
+      item.platform,
+      item.pillar,
+      item.workflowRoute,
+      item.stage,
+      item.workflowStep,
+      item.status,
+      item.lifecycle,
+      item.dueAt ? new Date(item.dueAt) : null,
+      ageHours,
+      item.lifecycle === 'Active' && (overdue || ageHours > threshold)
+        ? 'Needs attention'
+        : 'On track',
+      names(item.responsible),
+      names(item.accountable),
+      item.comments.filter(
+        (comment) => comment.kind === 'Feedback' && !comment.resolved,
+      ).length,
+      item.sourceLabel ?? '',
+    ];
+  });
   const raciRows = input.items.flatMap((item) =>
     (Object.keys(item.raci) as Stage[]).map((stage) => [
       item.title,
@@ -252,72 +285,113 @@ export async function exportTrackerWorkbook(input: {
   ]);
 
   const sheets = [
-      {
-        sheet: 'Content Pipeline',
-        data: sheetData(
-          [
-            'Title',
-            'Content Type',
-            'Platform',
-            'Content Mix',
-            'Route',
-            'Stage',
-            'Checkpoint',
-            'Status',
-            'Lifecycle',
-            'Due At',
-            'Responsible',
-            'Accountable',
-            'Open Feedback',
-            'Source',
-          ],
-          pipelineRows,
-        ),
-        stickyRowsCount: 1,
-        columns: [34, 16, 14, 20, 20, 16, 26, 18, 14, 20, 24, 24, 16, 24].map(
-          (width) => ({ width }),
-        ),
-      },
-      {
-        sheet: 'RACI',
-        data: sheetData(
-          ['Content Item', 'Stage', 'Responsible', 'Accountable', 'Consulted', 'Informed'],
-          raciRows,
-        ),
-        stickyRowsCount: 1,
-        columns: [34, 18, 28, 28, 28, 28].map((width) => ({ width })),
-      },
-      {
-        sheet: 'Feedback',
-        data: sheetData(
-          ['Content Item', 'Stage', 'Type', 'Author', 'Comment', 'Status', 'Resolved By', 'Recorded At'],
-          feedbackRows,
-        ),
-        stickyRowsCount: 1,
-        columns: [34, 18, 14, 20, 48, 14, 20, 22].map((width) => ({ width })),
-      },
-      {
-        sheet: 'People & Access',
-        data: sheetData(['Name', 'Email', 'Responsibility', 'Roles', 'Access'], peopleRows),
-        stickyRowsCount: 1,
-        columns: [24, 30, 52, 32, 16].map((width) => ({ width })),
-      },
-      {
-        sheet: 'Operating Cadence',
-        data: sheetData(
-          ['Name', 'Frequency', 'Stage', 'Owner', 'Participants', 'Deliverable', 'Time', 'Timezone', 'Status'],
-          cadenceRows,
-        ),
-        stickyRowsCount: 1,
-        columns: [30, 14, 16, 22, 34, 52, 12, 18, 14].map((width) => ({ width })),
-      },
-      {
-        sheet: 'Content Requests',
-        data: sheetData(['Department', 'Requested By', 'Request', 'Priority', 'Needed By', 'Status'], requestRows),
-        stickyRowsCount: 1,
-        columns: [20, 22, 52, 14, 16, 14].map((width) => ({ width })),
-      },
-    ] as Sheet<File | Blob | ArrayBuffer>[];
+    {
+      sheet: 'Content Pipeline',
+      data: sheetData(
+        [
+          'Title',
+          'Content Type',
+          'Platform',
+          'Content Mix',
+          'Route',
+          'Stage',
+          'Checkpoint',
+          'Status',
+          'Lifecycle',
+          'Due At',
+          'Hours in Stage',
+          'Flow Health',
+          'Responsible',
+          'Accountable',
+          'Open Feedback',
+          'Source',
+        ],
+        pipelineRows,
+      ),
+      stickyRowsCount: 1,
+      columns: [
+        34, 16, 14, 20, 20, 16, 26, 18, 14, 20, 16, 18, 24, 24, 16, 24,
+      ].map((width) => ({ width })),
+    },
+    {
+      sheet: 'RACI',
+      data: sheetData(
+        [
+          'Content Item',
+          'Stage',
+          'Responsible',
+          'Accountable',
+          'Consulted',
+          'Informed',
+        ],
+        raciRows,
+      ),
+      stickyRowsCount: 1,
+      columns: [34, 18, 28, 28, 28, 28].map((width) => ({ width })),
+    },
+    {
+      sheet: 'Feedback',
+      data: sheetData(
+        [
+          'Content Item',
+          'Stage',
+          'Type',
+          'Author',
+          'Comment',
+          'Status',
+          'Resolved By',
+          'Recorded At',
+        ],
+        feedbackRows,
+      ),
+      stickyRowsCount: 1,
+      columns: [34, 18, 14, 20, 48, 14, 20, 22].map((width) => ({ width })),
+    },
+    {
+      sheet: 'People & Access',
+      data: sheetData(
+        ['Name', 'Email', 'Responsibility', 'Roles', 'Access'],
+        peopleRows,
+      ),
+      stickyRowsCount: 1,
+      columns: [24, 30, 52, 32, 16].map((width) => ({ width })),
+    },
+    {
+      sheet: 'Operating Cadence',
+      data: sheetData(
+        [
+          'Name',
+          'Frequency',
+          'Stage',
+          'Owner',
+          'Participants',
+          'Deliverable',
+          'Time',
+          'Timezone',
+          'Status',
+        ],
+        cadenceRows,
+      ),
+      stickyRowsCount: 1,
+      columns: [30, 14, 16, 22, 34, 52, 12, 18, 14].map((width) => ({ width })),
+    },
+    {
+      sheet: 'Content Requests',
+      data: sheetData(
+        [
+          'Department',
+          'Requested By',
+          'Request',
+          'Priority',
+          'Needed By',
+          'Status',
+        ],
+        requestRows,
+      ),
+      stickyRowsCount: 1,
+      columns: [20, 22, 52, 14, 16, 14].map((width) => ({ width })),
+    },
+  ] as Sheet<File | Blob | ArrayBuffer>[];
   const workbook = writeExcelFile(sheets, {
     fontFamily: 'Aptos',
     fontSize: 11,

@@ -67,12 +67,47 @@ export type LiveSnapshot = {
   defaultReminderHours: number;
 };
 
+export type AccessState = {
+  profileId?: string;
+  email: string;
+  fullName: string;
+  status: 'preconfigured' | 'pending' | 'active' | 'paused' | 'rejected';
+  isActive: boolean;
+};
+
+export async function loadAccessState(
+  client: SupabaseClient,
+  user: User,
+): Promise<AccessState> {
+  const { data, error } = await client.rpc('get_my_access_state').maybeSingle();
+  if (error) throw error;
+  const row = data as {
+    profile_id?: string | null;
+    email?: string | null;
+    full_name?: string | null;
+    access_status?: AccessState['status'] | null;
+    is_active?: boolean | null;
+  } | null;
+  return {
+    profileId: row?.profile_id ?? undefined,
+    email: row?.email ?? user.email ?? '',
+    fullName:
+      row?.full_name ??
+      user.user_metadata?.full_name ??
+      user.email?.split('@')[0] ??
+      'User',
+    status: row?.access_status ?? 'pending',
+    isActive: Boolean(row?.is_active),
+  };
+}
+
 export async function loadLiveSnapshot(
   client: SupabaseClient,
   user: User,
 ): Promise<LiveSnapshot> {
   const [
     profilesRes,
+    contactsRes,
     ownersRes,
     rolesRes,
     itemsRes,
@@ -92,7 +127,10 @@ export async function loadLiveSnapshot(
   ] = await Promise.all([
     client
       .from('profiles')
-      .select('id,auth_user_id,email,full_name,is_active,responsibility'),
+      .select(
+        'id,auth_user_id,email,full_name,is_active,responsibility,access_status',
+      ),
+    client.from('profile_contacts').select('profile_id,phone'),
     client.from('workspace_owners').select('profile_id,slot'),
     client.from('user_roles').select('profile_id,role'),
     client
@@ -144,6 +182,7 @@ export async function loadLiveSnapshot(
   ]);
   const error = [
     profilesRes,
+    contactsRes,
     ownersRes,
     rolesRes,
     itemsRes,
@@ -164,6 +203,12 @@ export async function loadLiveSnapshot(
   if (error) throw error;
 
   const roleRows = rolesRes.data ?? [];
+  const contacts = new Map(
+    (contactsRes.data ?? []).map((contact) => [
+      contact.profile_id,
+      contact.phone,
+    ]),
+  );
   const people: Person[] = (profilesRes.data ?? []).map((profile) => {
     const name =
       profile.full_name || profile.email?.split('@')[0] || 'Team member';
@@ -182,6 +227,8 @@ export async function loadLiveSnapshot(
       isActive: profile.is_active,
       hasLogin: Boolean(profile.auth_user_id),
       responsibility: profile.responsibility ?? undefined,
+      accessStatus: profile.access_status ?? undefined,
+      phone: contacts.get(profile.id),
     };
   });
   const personById = new Map(people.map((person) => [person.id, person]));

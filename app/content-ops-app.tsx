@@ -38,6 +38,7 @@ import {
   Monitor,
   Moon,
   Plus,
+  Phone,
   RefreshCw,
   Send,
   Settings2,
@@ -150,7 +151,11 @@ import {
   type WorkflowRoute,
 } from '@/lib/content-types';
 import { makeSupabaseClient, type SupabaseConfig } from '@/lib/supabase-client';
-import { loadLiveSnapshot } from '@/lib/supabase-data';
+import {
+  loadAccessState,
+  loadLiveSnapshot,
+  type AccessState,
+} from '@/lib/supabase-data';
 import {
   CALENDAR_IMPORT_ROW_LIMIT,
   EXCEL_IMPORT_LIMIT_BYTES,
@@ -242,6 +247,7 @@ export default function ContentOpsApp({
   const [authUser, setAuthUser] = useState<User | null>(null);
   const [authReady, setAuthReady] = useState(demoMode);
   const [activeProfile, setActiveProfile] = useState(demoMode);
+  const [accessState, setAccessState] = useState<AccessState>();
   const [people, setPeople] = useState<Person[]>(demoPeople);
   const [items, setItems] = useState<ContentItem[]>(demoItems);
   const [requests, setRequests] = useState<DepartmentRequest[]>(demoRequests);
@@ -271,11 +277,16 @@ export default function ContentOpsApp({
   const [overrideItem, setOverrideItem] = useState<ContentItem>();
   const [moveIntent, setMoveIntent] = useState<MoveIntent>();
   const [notificationsOpen, setNotificationsOpen] = useState(false);
+  const [contactOpen, setContactOpen] = useState(false);
   const [notice, setNotice] = useState('');
   const [busy, setBusy] = useState(false);
 
   const reloadLive = useCallback(
     async (supabase: SupabaseClient, user: User) => {
+      const access = await loadAccessState(supabase, user);
+      setAccessState(access);
+      setActiveProfile(access.isActive && access.status === 'active');
+      if (!access.isActive || access.status !== 'active') return;
       const snapshot = await loadLiveSnapshot(supabase, user);
       setPeople(snapshot.people);
       setItems(snapshot.items);
@@ -360,6 +371,10 @@ export default function ContentOpsApp({
       data.subscription.unsubscribe();
     };
   }, [client, reloadLive]);
+
+  useEffect(() => {
+    if (!demoMode && authReady && !authUser) window.location.replace('/login');
+  }, [authReady, authUser, demoMode]);
 
   const isOwner = currentUser.roles.includes('Owner');
   const isPrimaryAccessOwner =
@@ -615,8 +630,7 @@ export default function ContentOpsApp({
   };
 
   const toggleAkhilOwner = async (person: Person, enabled: boolean) => {
-    const isAkhil =
-      person.email.toLowerCase() === 'akhil@buildablelabs.com';
+    const isAkhil = person.email.toLowerCase() === 'akhil@buildablelabs.com';
     if (!isAkhil || !isPrimaryAccessOwner)
       return showNotice('Only Aditi can change Akhil Owner access.');
     if (demoMode) {
@@ -636,12 +650,78 @@ export default function ContentOpsApp({
         `Akhil's Owner access was ${enabled ? 'enabled' : 'removed'} in the demo.`,
       );
     }
+    return mutateLive(
+      async (supabase) => {
+        const { error } = await supabase.rpc('set_akhil_owner', {
+          p_enabled: enabled,
+        });
+        if (error) throw error;
+      },
+      `Akhil's Owner access was ${enabled ? 'enabled' : 'removed'}.`,
+    );
+  };
+
+  const approveAccess = async (person: Person) => {
+    if (demoMode) {
+      setPeople((all) =>
+        all.map((entry) =>
+          entry.id === person.id
+            ? { ...entry, isActive: true, accessStatus: 'active' }
+            : entry,
+        ),
+      );
+      return showNotice(`${person.name}'s access was approved in the demo.`);
+    }
     return mutateLive(async (supabase) => {
-      const { error } = await supabase.rpc('set_akhil_owner', {
-        p_enabled: enabled,
+      const { error } = await supabase.rpc('approve_profile_access', {
+        p_profile_id: person.id,
       });
       if (error) throw error;
-    }, `Akhil's Owner access was ${enabled ? 'enabled' : 'removed'}.`);
+    }, `${person.name}'s access is now active.`);
+  };
+
+  const rejectAccess = async (person: Person) => {
+    if (demoMode) {
+      setPeople((all) =>
+        all.map((entry) =>
+          entry.id === person.id
+            ? { ...entry, isActive: false, accessStatus: 'rejected' }
+            : entry,
+        ),
+      );
+      return showNotice(`${person.name}'s request was rejected in the demo.`);
+    }
+    return mutateLive(async (supabase) => {
+      const { error } = await supabase.rpc('reject_profile_access', {
+        p_profile_id: person.id,
+      });
+      if (error) throw error;
+    }, `${person.name}'s access request was rejected.`);
+  };
+
+  const saveMyPhone = async (phone: string) => {
+    if (demoMode) {
+      setCurrentUser((person) => ({ ...person, phone: phone || undefined }));
+      setPeople((all) =>
+        all.map((person) =>
+          person.id === currentUser.id
+            ? { ...person, phone: phone || undefined }
+            : person,
+        ),
+      );
+      setContactOpen(false);
+      return showNotice('Phone number saved in the demo.');
+    }
+    const saved = await mutateLive(
+      async (supabase) => {
+        const { error } = await supabase.rpc('save_my_phone', {
+          p_phone: phone || null,
+        });
+        if (error) throw error;
+      },
+      phone ? 'Phone number saved.' : 'Phone number removed.',
+    );
+    if (saved) setContactOpen(false);
   };
 
   const inviteUser = async (draft: InviteDraft) => {
@@ -1376,10 +1456,7 @@ export default function ContentOpsApp({
   }, [visibleItems, myActions, canCreate, effectiveRoles, rolePerson]);
 
   if (!authReady) return <LoadingScreen />;
-  if (!demoMode && !authUser)
-    return (
-      <LoginScreen client={client!} notice={notice} setNotice={setNotice} />
-    );
+  if (!demoMode && !authUser) return <LoadingScreen />;
   if (!demoMode && authUser && needsPasswordSetup)
     return (
       <SetPasswordScreen
@@ -1398,7 +1475,7 @@ export default function ContentOpsApp({
   if (!demoMode && !activeProfile)
     return (
       <PendingAccess
-        email={authUser?.email ?? ''}
+        access={accessState}
         signOut={() => void client?.auth.signOut()}
       />
     );
@@ -1603,6 +1680,15 @@ export default function ContentOpsApp({
             >
               <Bell />
             </Button>
+            <Button
+              variant="outline"
+              size="icon"
+              aria-label="Save my phone number"
+              title="My phone number"
+              onClick={() => setContactOpen(true)}
+            >
+              <Phone />
+            </Button>
             {canCreate && (
               <Button
                 onClick={() => setCreateOpen(true)}
@@ -1683,9 +1769,12 @@ export default function ContentOpsApp({
               demoMode={demoMode}
               busy={busy}
               canManageAccess={canManageAccess}
+              isPrimaryAccessOwner={isPrimaryAccessOwner}
               onInvite={() => setInviteTarget('new')}
               onInvitePerson={(person) => setInviteTarget(person)}
               onManage={manageAccess}
+              onApprove={approveAccess}
+              onReject={rejectAccess}
               onToggleAkhilOwner={toggleAkhilOwner}
             />
           )}
@@ -1717,6 +1806,14 @@ export default function ContentOpsApp({
           setNotificationsOpen(false);
           setSelectedId(id);
         }}
+      />
+      <PhoneSheet
+        key={`${contactOpen}-${currentUser.phone ?? ''}`}
+        open={contactOpen}
+        onOpenChange={setContactOpen}
+        person={currentUser}
+        busy={busy}
+        onSave={saveMyPhone}
       />
       <CreateDialog
         key={people.map((person) => person.id).join(':')}
@@ -1818,10 +1915,7 @@ function canSubmitItem(item: ContentItem, roles: AppRole[], person: Person) {
   );
 }
 function canApproveItem(item: ContentItem, roles: AppRole[], person: Person) {
-  return (
-    roles.includes('Owner') ||
-    isAssigned(item, person, 'accountable')
-  );
+  return roles.includes('Owner') || isAssigned(item, person, 'accountable');
 }
 function canSecondLensReview(
   item: ContentItem,
@@ -2201,10 +2295,7 @@ function ActionCenter({
 }) {
   return (
     <Sheet open={open} onOpenChange={onOpenChange}>
-      <SheetContent
-        side="right"
-        className="w-full overflow-y-auto sm:max-w-md"
-      >
+      <SheetContent side="right" className="w-full overflow-y-auto sm:max-w-md">
         <SheetHeader className="border-b border-border pr-12">
           <SheetTitle>Action centre</SheetTitle>
           <SheetDescription>
@@ -2237,6 +2328,66 @@ function ActionCenter({
             <EmptyState text="You are all caught up. No action is waiting on this login." />
           )}
         </div>
+      </SheetContent>
+    </Sheet>
+  );
+}
+
+function PhoneSheet({
+  open,
+  onOpenChange,
+  person,
+  busy,
+  onSave,
+}: {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  person: Person;
+  busy: boolean;
+  onSave: (phone: string) => void;
+}) {
+  const [phone, setPhone] = useState(person.phone ?? '');
+  return (
+    <Sheet open={open} onOpenChange={onOpenChange}>
+      <SheetContent side="right" className="w-full sm:max-w-md">
+        <SheetHeader>
+          <SheetTitle>My phone number</SheetTitle>
+          <SheetDescription>
+            Save a number for urgent manual calls. Only you, Admins and Owners
+            can view it.
+          </SheetDescription>
+        </SheetHeader>
+        <div className="p-4 pt-0">
+          <Label htmlFor="my-phone" className="mb-1.5">
+            Phone number
+          </Label>
+          <Input
+            id="my-phone"
+            type="tel"
+            autoComplete="tel"
+            value={phone}
+            onChange={(event) => setPhone(event.target.value)}
+            placeholder="+91 98765 43210"
+          />
+          <p className="mt-2 text-xs text-muted-foreground">
+            Use 7–15 digits. Country code is recommended.
+          </p>
+        </div>
+        <SheetFooter>
+          <Button
+            variant="outline"
+            disabled={busy || !person.phone}
+            onClick={() => onSave('')}
+          >
+            Remove number
+          </Button>
+          <Button
+            disabled={busy || phone.trim().length < 7}
+            onClick={() => onSave(phone.trim())}
+          >
+            {busy ? 'Saving…' : 'Save number'}
+          </Button>
+        </SheetFooter>
       </SheetContent>
     </Sheet>
   );
@@ -3171,8 +3322,7 @@ function ContentCalendar({
   );
   const selectedDayItems = selectedDay
     ? scheduled.filter(
-        (item) =>
-          localDateKey(new Date(item.dueAt as string)) === selectedDay,
+        (item) => localDateKey(new Date(item.dueAt as string)) === selectedDay,
       )
     : [];
   const moveMonth = (offset: number) => {
@@ -3218,7 +3368,9 @@ function ContentCalendar({
               <FileDown /> Export Excel
             </Button>
             <div className="grid size-10 place-items-center">
-              <HelpTip text={`Admins can upload Excel up to ${EXCEL_IMPORT_LIMIT_BYTES / 1024 / 1024} MB or a text-based PDF up to ${PDF_IMPORT_LIMIT_BYTES / 1024 / 1024} MB, with at most ${CALENDAR_IMPORT_ROW_LIMIT.toLocaleString('en-IN')} dated rows. Matching rows are skipped safely.`} />
+              <HelpTip
+                text={`Admins can upload Excel up to ${EXCEL_IMPORT_LIMIT_BYTES / 1024 / 1024} MB or a text-based PDF up to ${PDF_IMPORT_LIMIT_BYTES / 1024 / 1024} MB, with at most ${CALENDAR_IMPORT_ROW_LIMIT.toLocaleString('en-IN')} dated rows. Matching rows are skipped safely.`}
+              />
             </div>
           </div>
         }
@@ -4506,23 +4658,32 @@ function People({
   demoMode,
   busy,
   canManageAccess,
+  isPrimaryAccessOwner,
   onInvite,
   onInvitePerson,
   onManage,
+  onApprove,
+  onReject,
   onToggleAkhilOwner,
 }: {
   people: Person[];
   demoMode: boolean;
   busy: boolean;
   canManageAccess: boolean;
+  isPrimaryAccessOwner: boolean;
   onInvite: () => void;
   onInvitePerson: (person: Person) => void;
   onManage: (person: Person, active: boolean, roles: AppRole[]) => void;
+  onApprove: (person: Person) => void;
+  onReject: (person: Person) => void;
   onToggleAkhilOwner: (person: Person, enabled: boolean) => void;
 }) {
   const [selectedPersonId, setSelectedPersonId] = useState<string>();
   const selectedPerson = people.find(
     (person) => person.id === selectedPersonId,
+  );
+  const pendingPeople = people.filter(
+    (person) => person.hasLogin && person.accessStatus === 'pending',
   );
   return (
     <>
@@ -4532,13 +4693,84 @@ function People({
         action={
           <div className="flex items-center gap-2">
             {demoMode && <Badge variant="outline">Demo data</Badge>}
-            <HelpTip text="Aditi is the protected primary Owner. Only she can activate accounts, change roles, or grant optional Owner access to Akhil." />
-            <Button onClick={onInvite}>
-              <Plus /> Invite teammate
-            </Button>
+            <HelpTip text="Aditi controls roles, Admin approval and optional Owner access for Akhil. Admins can invite and approve preconfigured non-Admin teammates." />
+            {canManageAccess ? (
+              <Button onClick={onInvite}>
+                <Plus /> Add or invite teammate
+              </Button>
+            ) : (
+              <Badge variant="outline">Open a team member to invite</Badge>
+            )}
           </div>
         }
       />
+      {pendingPeople.length > 0 && (
+        <Card className="mb-5 border-[#dfa126]/45 bg-[var(--warning-subtle)]">
+          <CardHeader>
+            <CardTitle className="text-[var(--warning-foreground)]">
+              Pending access requests
+            </CardTitle>
+            <CardDescription>
+              Approve only the person whose identity and saved responsibility
+              you recognise. Admin access always requires Aditi.
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            {pendingPeople.map((person) => {
+              const needsOwner = person.roles.includes('Admin');
+              const hasRole = person.roles.length > 0;
+              const canApprove =
+                hasRole && (!needsOwner || isPrimaryAccessOwner);
+              return (
+                <div
+                  key={person.id}
+                  className="flex flex-col gap-3 rounded-xl border border-[#dfa126]/35 bg-card p-4 sm:flex-row sm:items-center"
+                >
+                  <Avatar person={person} />
+                  <div className="min-w-0 flex-1">
+                    <p className="font-semibold text-card-foreground">
+                      {person.name}
+                    </p>
+                    <p className="truncate text-sm text-muted-foreground">
+                      {person.email}
+                    </p>
+                    <div className="mt-2 flex flex-wrap gap-1.5">
+                      {person.roles.map((role) => (
+                        <Badge key={role} variant="outline">
+                          {role}
+                        </Badge>
+                      ))}
+                      {!hasRole && (
+                        <Badge variant="outline">
+                          Aditi must assign a responsibility
+                        </Badge>
+                      )}
+                      {needsOwner && !isPrimaryAccessOwner && (
+                        <Badge variant="outline">Aditi approval required</Badge>
+                      )}
+                    </div>
+                  </div>
+                  <div className="flex gap-2">
+                    <Button
+                      variant="outline"
+                      disabled={busy || (needsOwner && !isPrimaryAccessOwner)}
+                      onClick={() => onReject(person)}
+                    >
+                      Reject
+                    </Button>
+                    <Button
+                      disabled={busy || !canApprove}
+                      onClick={() => onApprove(person)}
+                    >
+                      Approve
+                    </Button>
+                  </div>
+                </div>
+              );
+            })}
+          </CardContent>
+        </Card>
+      )}
       <Card className="overflow-hidden bg-card">
         <CardContent className="overflow-x-auto p-0">
           <Table>
@@ -4596,11 +4828,7 @@ function People({
                           : 'secondary'
                       }
                     >
-                      {!person.hasLogin
-                        ? 'Not invited'
-                        : person.isActive === false
-                          ? 'Paused'
-                          : 'Active'}
+                      {accessLabel(person)}
                     </Badge>
                   </TableCell>
                   <TableCell className="text-right">
@@ -4670,8 +4898,7 @@ function AccessCard({
   onToggleAkhilOwner: (person: Person, enabled: boolean) => void;
 }) {
   const isOwner = person.roles.includes('Owner');
-  const isAkhil =
-    person.email.toLowerCase() === 'akhil@buildablelabs.com';
+  const isAkhil = person.email.toLowerCase() === 'akhil@buildablelabs.com';
   const [active, setActive] = useState(person.isActive !== false);
   const [roles, setRoles] = useState<AppRole[]>(
     person.roles.filter((role) => role !== 'Owner'),
@@ -4701,6 +4928,14 @@ function AccessCard({
             {person.responsibility}
           </p>
         )}
+        {person.phone && (
+          <a
+            href={`tel:${person.phone.replace(/[^+0-9]/g, '')}`}
+            className="mt-3 inline-flex items-center gap-2 text-sm font-medium text-card-foreground hover:underline"
+          >
+            <Phone className="size-4" /> {person.phone}
+          </a>
+        )}
       </CardHeader>
       <CardContent>
         {canManage && isAkhil && (
@@ -4729,7 +4964,7 @@ function AccessCard({
               ? 'Akhil currently has Owner access. Unchecking the option above removes only Owner access; his Admin role remains.'
               : isAkhil
                 ? 'Owner access is active. Only Aditi can remove it.'
-              : 'Protected full-access ID. Aditi’s primary Owner access cannot be changed here.'}
+                : 'Protected full-access ID. Aditi’s primary Owner access cannot be changed here.'}
           </p>
         ) : canManage ? (
           <>
@@ -4788,11 +5023,7 @@ function AccessCard({
               <Badge
                 variant={person.isActive === false ? 'outline' : 'secondary'}
               >
-                {!person.hasLogin
-                  ? 'Not invited'
-                  : person.isActive === false
-                    ? 'Paused'
-                    : 'Active'}
+                {accessLabel(person)}
               </Badge>
             </div>
             <div className="flex flex-wrap gap-2">
@@ -4816,6 +5047,16 @@ function AccessCard({
     </Card>
   );
 }
+
+function accessLabel(person: Person) {
+  if (!person.hasLogin) return 'Not invited';
+  if (person.accessStatus === 'pending') return 'Awaiting approval';
+  if (person.accessStatus === 'rejected') return 'Rejected';
+  if (person.accessStatus === 'paused' || person.isActive === false)
+    return 'Paused';
+  return 'Active';
+}
+
 function Settings({
   demoMode,
   raci,
@@ -6349,10 +6590,11 @@ function InviteUserDialog({
           ) : (
             <Alert className="border-border bg-muted/45">
               <ShieldCheck />
-              <AlertTitle>Aditi will approve access</AlertTitle>
+              <AlertTitle>Pre-set responsibilities stay unchanged</AlertTitle>
               <AlertDescription>
-                You can send the invitation. The account remains pending until
-                Aditi assigns its responsibilities.
+                This invitation activates the responsibilities already saved for
+                this team member. If the saved role is Admin, Aditi must approve
+                it once.
               </AlertDescription>
             </Alert>
           )}
@@ -6412,8 +6654,8 @@ function CalendarImportDialog({
           </DialogTitle>
           <DialogDescription>
             {rows?.[0]?.importSource ?? 'Calendar file'} · active and future
-            rows plus the prior 30 days will be added as separate content
-            items. Matching rows already imported are skipped.
+            rows plus the prior 30 days will be added as separate content items.
+            Matching rows already imported are skipped.
           </DialogDescription>
         </DialogHeader>
         <div className="flex flex-wrap gap-2">
@@ -6797,141 +7039,6 @@ function MoveDialog({
   );
 }
 
-function LoginScreen({
-  client,
-  notice,
-  setNotice,
-}: {
-  client: SupabaseClient;
-  notice: string;
-  setNotice: (value: string) => void;
-}) {
-  const [email, setEmail] = useState('');
-  const [password, setPassword] = useState('');
-  const [busy, setBusy] = useState(false);
-  const submit = async (event: SyntheticEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    setNotice('');
-    setBusy(true);
-    try {
-      const { error } = await client.auth.signInWithPassword({
-        email: email.trim().toLowerCase(),
-        password,
-      });
-      if (error)
-        setNotice(
-          error.message.toLowerCase().includes('invalid login credentials')
-            ? 'That password is not active yet. Open your invitation email, or use “Set or reset password” below to create one.'
-            : error.message,
-        );
-    } catch {
-      setNotice('Sign-in could not be completed. Please try again.');
-    } finally {
-      setBusy(false);
-    }
-  };
-  const resetPassword = async () => {
-    if (!email.trim()) {
-      setNotice('Enter your email address first.');
-      return;
-    }
-    setBusy(true);
-    try {
-      const redirect = new URL(window.location.origin);
-      redirect.searchParams.set('auth_action', 'recovery');
-      const { error } = await client.auth.resetPasswordForEmail(
-        email.trim().toLowerCase(),
-        { redirectTo: redirect.toString() },
-      );
-      setNotice(
-        error
-          ? error.message
-          : 'Password link sent. Open it to create your password, then return here to sign in.',
-      );
-    } catch {
-      setNotice('The password email could not be sent. Please try again.');
-    } finally {
-      setBusy(false);
-    }
-  };
-  return (
-    <div className="grid min-h-svh place-items-center bg-background p-4">
-      <div className="w-full max-w-md">
-        <Image
-          src="/aafm-india-logo.png"
-          alt="AAFM India — American Academy of Financial Management"
-          width={1684}
-          height={594}
-          className="mx-auto mb-7 h-auto w-full max-w-[360px]"
-        />
-        <Card className="bg-card p-2 shadow-xl">
-          <CardHeader>
-            <CardTitle className="font-display text-2xl">
-              Sign in to Content Operations
-            </CardTitle>
-            <CardDescription>
-              Sign in with the password you created from your invitation email.
-            </CardDescription>
-          </CardHeader>
-          <CardContent>
-            <form onSubmit={submit} className="space-y-4">
-              <div>
-                <Label htmlFor="login-email" className="mb-1.5">
-                  Email
-                </Label>
-                <Input
-                  id="login-email"
-                  type="email"
-                  autoComplete="email"
-                  value={email}
-                  onChange={(event) => setEmail(event.target.value)}
-                  required
-                />
-              </div>
-              <div>
-                <Label htmlFor="login-password" className="mb-1.5">
-                  Password
-                </Label>
-                <Input
-                  id="login-password"
-                  type="password"
-                  autoComplete="current-password"
-                  value={password}
-                  onChange={(event) => setPassword(event.target.value)}
-                  required
-                />
-              </div>
-              {notice && (
-                <output
-                  aria-live="polite"
-                  className="text-sm text-[var(--danger-foreground)]"
-                >
-                  {notice}
-                </output>
-              )}
-              <Button type="submit" className="w-full" disabled={busy}>
-                {busy ? 'Signing in…' : 'Sign in'}
-              </Button>
-              <Button
-                type="button"
-                variant="ghost"
-                className="w-full"
-                disabled={busy}
-                onClick={() => void resetPassword()}
-              >
-                Set or reset password
-              </Button>
-            </form>
-          </CardContent>
-        </Card>
-        <p className="mt-4 text-center text-xs text-muted-foreground">
-          Invite-only access · Asia/Kolkata
-        </p>
-      </div>
-    </div>
-  );
-}
-
 function SetPasswordScreen({
   client,
   email,
@@ -7050,23 +7157,34 @@ function LoadingScreen() {
   );
 }
 function PendingAccess({
-  email,
+  access,
   signOut,
 }: {
-  email: string;
+  access?: AccessState;
   signOut: () => void;
 }) {
+  const rejected = access?.status === 'rejected';
+  const paused = access?.status === 'paused';
   return (
     <div className="grid min-h-svh place-items-center bg-background p-4">
       <Card className="max-w-md bg-card">
         <CardHeader>
-          <CardTitle>Access is waiting for an Owner</CardTitle>
-          <CardDescription>{email}</CardDescription>
+          <CardTitle>
+            {rejected
+              ? 'Access was not approved'
+              : paused
+                ? 'Access is paused'
+                : 'Approval pending'}
+          </CardTitle>
+          <CardDescription>{access?.email ?? ''}</CardDescription>
         </CardHeader>
         <CardContent>
           <p className="text-sm text-muted-foreground">
-            Your account is valid. Aditi needs to activate it and assign at
-            least one responsibility.
+            {rejected
+              ? 'Contact Aditi if this request should be reviewed again.'
+              : paused
+                ? 'An Owner has paused this account. Contact Aditi if you need access restored.'
+                : 'Your login is valid, but the tracker stays locked until your saved team responsibilities are approved.'}
           </p>
           <Button variant="outline" className="mt-4" onClick={signOut}>
             Sign out

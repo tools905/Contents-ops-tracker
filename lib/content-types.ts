@@ -75,6 +75,8 @@ export type Person = {
   isActive?: boolean;
   hasLogin?: boolean;
   responsibility?: string;
+  accessStatus?: 'preconfigured' | 'pending' | 'active' | 'paused' | 'rejected';
+  phone?: string;
 };
 export type RaciAssignment = {
   responsible: Person[];

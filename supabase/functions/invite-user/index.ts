@@ -41,10 +41,14 @@ Deno.serve(async (request) => {
 
   const { data: callerProfile } = await admin
     .from('profiles')
-    .select('id')
+    .select('id,is_active,access_status')
     .eq('auth_user_id', identity.user.id)
     .maybeSingle();
-  if (!callerProfile)
+  if (
+    !callerProfile ||
+    !callerProfile.is_active ||
+    callerProfile.access_status !== 'active'
+  )
     return reply({ error: 'Active profile not found' }, 403);
 
   const [{ data: owner }, { data: adminRole }] = await Promise.all([
@@ -85,18 +89,37 @@ Deno.serve(async (request) => {
     return reply({ error: 'Choose only valid responsibilities' }, 400);
   if (owner && !roles.length)
     return reply({ error: 'Choose at least one responsibility' }, 400);
+  if (!owner && !payload.profileId)
+    return reply(
+      {
+        error:
+          'Admins invite from an existing team profile so its saved responsibilities stay unchanged',
+      },
+      400,
+    );
 
   let targetProfileId = payload.profileId;
+  let fixedRoles: string[] = [];
   if (targetProfileId) {
-    const { data: target } = await admin
-      .from('profiles')
-      .select('id,auth_user_id')
-      .eq('id', targetProfileId)
-      .maybeSingle();
-    if (!target)
-      return reply({ error: 'Team member not found' }, 404);
+    const [{ data: target }, { data: targetRoles }] = await Promise.all([
+      admin
+        .from('profiles')
+        .select('id,auth_user_id')
+        .eq('id', targetProfileId)
+        .maybeSingle(),
+      admin.from('user_roles').select('role').eq('profile_id', targetProfileId),
+    ]);
+    if (!target) return reply({ error: 'Team member not found' }, 404);
     if (target.auth_user_id)
       return reply({ error: 'This person already has a login' }, 409);
+    fixedRoles = (targetRoles ?? []).map(
+      (entry: { role: string }) => entry.role,
+    );
+    if (!owner && !fixedRoles.length)
+      return reply(
+        { error: 'Aditi must assign this person a responsibility first' },
+        403,
+      );
     const { error: prepareError } = await admin
       .from('profiles')
       .update({ email, full_name: fullName })
@@ -108,7 +131,7 @@ Deno.serve(async (request) => {
   const origin = request.headers.get('origin');
   const redirectTo =
     origin && /^https?:\/\//.test(origin)
-      ? `${origin}/?auth_action=invite`
+      ? `${origin}/login?auth_action=invite`
       : undefined;
   const { data: invited, error: inviteError } =
     await admin.auth.admin.inviteUserByEmail(email, {
@@ -130,25 +153,34 @@ Deno.serve(async (request) => {
     targetProfileId = linkedProfile?.id;
   }
   if (!targetProfileId)
-    return reply({ error: 'Invitation created, but profile linking failed' }, 500);
+    return reply(
+      { error: 'Invitation created, but profile linking failed' },
+      500,
+    );
 
   if (owner) {
     await admin.from('user_roles').delete().eq('profile_id', targetProfileId);
-    const { error: rolesError } = await admin.from('user_roles').insert(
-      roles.map((role) => ({ profile_id: targetProfileId!, role })),
-    );
+    const { error: rolesError } = await admin
+      .from('user_roles')
+      .insert(roles.map((role) => ({ profile_id: targetProfileId!, role })));
     if (rolesError)
       return reply({ error: 'Invitation created, but role setup failed' }, 500);
   }
+  const requiresOwnerApproval = !owner && fixedRoles.includes('admin');
+  const accessActive = Boolean(owner) || !requiresOwnerApproval;
   const { error: profileError } = await admin
     .from('profiles')
-    .update({ full_name: fullName, is_active: Boolean(owner) })
+    .update({
+      full_name: fullName,
+      is_active: accessActive,
+      access_status: accessActive ? 'active' : 'pending',
+    })
     .eq('id', targetProfileId);
   if (profileError)
     return reply({ error: 'Invitation created, but access setup failed' }, 500);
   return reply({
     invited: true,
     email,
-    access: owner ? 'active' : 'pending_owner_approval',
+    access: accessActive ? 'active' : 'pending_owner_approval',
   });
 });

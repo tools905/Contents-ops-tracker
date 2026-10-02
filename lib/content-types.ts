@@ -155,6 +155,8 @@ export type ContentItem = {
   comments: Comment[];
   metrics: MetricEntry[];
   publishedAt?: string;
+  archivedAt?: string;
+  archivedBy?: Person;
   createdAt?: string;
   updatedAt?: string;
 };

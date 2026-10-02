@@ -312,6 +312,8 @@ export async function loadLiveSnapshot(
       raci,
       secondLens: secondLens as ContentItem['secondLens'],
       publishedAt: row.published_at ?? undefined,
+      archivedAt: row.archived_at ?? undefined,
+      archivedBy: row.archived_by ? fallbackPerson(row.archived_by) : undefined,
       links: (linksRes.data ?? [])
         .filter((link) => link.content_item_id === row.id)
         .map((link) => ({ label: link.label, kind: link.kind, url: link.url })),

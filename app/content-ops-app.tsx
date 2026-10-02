@@ -11,6 +11,7 @@ import {
 } from 'react';
 import type { SupabaseClient, User } from '@supabase/supabase-js';
 import {
+  Archive,
   AlertTriangle,
   ArrowRight,
   BarChart3,
@@ -40,6 +41,7 @@ import {
   Plus,
   Phone,
   RefreshCw,
+  RotateCcw,
   Send,
   Settings2,
   ShieldCheck,
@@ -278,6 +280,8 @@ export default function ContentOpsApp({
   const [moveIntent, setMoveIntent] = useState<MoveIntent>();
   const [notificationsOpen, setNotificationsOpen] = useState(false);
   const [contactOpen, setContactOpen] = useState(false);
+  const [archiveOpen, setArchiveOpen] = useState(false);
+  const [archiveConfirmItem, setArchiveConfirmItem] = useState<ContentItem>();
   const [notice, setNotice] = useState('');
   const [busy, setBusy] = useState(false);
 
@@ -415,6 +419,10 @@ export default function ContentOpsApp({
     'Content Producer',
   ]);
   const canManageOperations = hasAnyRole(effectiveRoles, ['Owner', 'Admin']);
+  const archivedItems = useMemo(
+    () => items.filter((item) => item.lifecycle === 'Archived'),
+    [items],
+  );
   const visibleCadences = useMemo(
     () =>
       canManageOperations || effectiveRoles.includes('Read-only Stakeholder')
@@ -1150,7 +1158,7 @@ export default function ContentOpsApp({
   const exportWorkbook = async () => {
     try {
       await exportTrackerWorkbook({
-        items: visibleItems,
+        items: visibleItems.filter((item) => item.lifecycle !== 'Archived'),
         people,
         cadences,
         requests,
@@ -1161,6 +1169,78 @@ export default function ContentOpsApp({
         error instanceof Error ? error.message : 'Excel export failed.',
       );
     }
+  };
+
+  const archiveItem = async (item: ContentItem) => {
+    if (!demoMode) {
+      const saved = await mutateLive(async (supabase) => {
+        const { error } = await supabase.rpc('archive_content_item', {
+          p_item_id: item.id,
+        });
+        if (error) throw error;
+      }, 'Content moved to Archive.');
+      if (saved) {
+        setArchiveConfirmItem(undefined);
+        setSelectedId(undefined);
+      }
+      return;
+    }
+    setItems((all) =>
+      all.map((row) =>
+        row.id === item.id
+          ? {
+              ...row,
+              lifecycle: 'Archived',
+              archivedAt: new Date().toISOString(),
+              archivedBy: rolePerson,
+              history: [
+                ...row.history,
+                {
+                  action: 'Archived',
+                  actor: rolePerson.name,
+                  at: 'Just now',
+                  note: 'Moved out of the active tracker',
+                },
+              ],
+            }
+          : row,
+      ),
+    );
+    setArchiveConfirmItem(undefined);
+    setSelectedId(undefined);
+    showNotice('Content moved to Archive.');
+  };
+
+  const restoreItem = async (item: ContentItem) => {
+    if (!demoMode)
+      return mutateLive(async (supabase) => {
+        const { error } = await supabase.rpc('restore_content_item', {
+          p_item_id: item.id,
+        });
+        if (error) throw error;
+      }, 'Content restored.');
+    setItems((all) =>
+      all.map((row) =>
+        row.id === item.id
+          ? {
+              ...row,
+              lifecycle: row.publishedAt ? 'Closed' : 'Active',
+              archivedAt: undefined,
+              archivedBy: undefined,
+              history: [
+                ...row.history,
+                {
+                  action: 'Restored',
+                  actor: rolePerson.name,
+                  at: 'Just now',
+                  note: 'Returned to the tracker',
+                },
+              ],
+            }
+          : row,
+      ),
+    );
+    showNotice('Content restored.');
   };
 
   const saveDefaultReminder = async (hours: number) => {
@@ -1742,8 +1822,11 @@ export default function ContentOpsApp({
               items={visibleItems}
               roles={effectiveRoles}
               person={rolePerson}
+              archiveCount={archivedItems.length}
+              canManageArchive={canManageOperations && !isRolePreview}
               onOpen={(id) => setSelectedId(id)}
               onMove={requestMove}
+              onOpenArchive={() => setArchiveOpen(true)}
             />
           )}
           {view === 'calendar' && (
@@ -1836,12 +1919,22 @@ export default function ContentOpsApp({
         onImport={() => void importCalendar()}
         busy={busy}
       />
+      <ArchiveSheet
+        open={archiveOpen}
+        onOpenChange={setArchiveOpen}
+        items={archivedItems}
+        onOpen={(id) => {
+          setArchiveOpen(false);
+          setSelectedId(id);
+        }}
+      />
       <ItemDetail
         open={Boolean(selected)}
         item={selected}
         roles={effectiveRoles}
         person={rolePerson}
         busy={busy}
+        canManageArchive={canManageOperations && !isRolePreview}
         onOpenChange={(open) => !open && setSelectedId(undefined)}
         onStepChange={setWorkflowStep}
         onSubmit={submitStage}
@@ -1849,7 +1942,40 @@ export default function ContentOpsApp({
         onRequestChanges={requestChanges}
         onComment={addComment}
         onResolveComment={setCommentResolution}
+        onArchive={(item) => setArchiveConfirmItem(item)}
+        onRestore={restoreItem}
       />
+      <Dialog
+        open={Boolean(archiveConfirmItem)}
+        onOpenChange={(open) => !open && setArchiveConfirmItem(undefined)}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Archive this content?</DialogTitle>
+            <DialogDescription>
+              It will no longer appear in the active Pipeline or Calendar. Its
+              RACI, comments, feedback and history stay safely stored and can be
+              restored later.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => setArchiveConfirmItem(undefined)}
+            >
+              Cancel
+            </Button>
+            <Button
+              disabled={busy}
+              onClick={() =>
+                archiveConfirmItem && void archiveItem(archiveConfirmItem)
+              }
+            >
+              <Archive /> Archive content
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
       <RaciDefaultDialog
         stage={raciStageIntent}
         assignment={raciStageIntent ? raciDefaults[raciStageIntent] : undefined}
@@ -2872,14 +2998,20 @@ function Pipeline({
   items,
   roles,
   person,
+  archiveCount,
+  canManageArchive,
   onOpen,
   onMove,
+  onOpenArchive,
 }: {
   items: ContentItem[];
   roles: AppRole[];
   person: Person;
+  archiveCount: number;
+  canManageArchive: boolean;
   onOpen: (id: string) => void;
   onMove: (item: ContentItem, stage: Stage) => void;
+  onOpenArchive: () => void;
 }) {
   const stageStyles = [
     'border-t-[#77809b] bg-[var(--pipeline-neutral)]',
@@ -2907,7 +3039,14 @@ function Pipeline({
         eyebrow="WORK"
         title="Content pipeline"
         action={
-          <HelpTip text="Full production uses all six stages. Design work moves from Idea to Production. Same-day work enters the amber ad hoc checkpoint before Upload." />
+          <div className="flex items-center gap-2">
+            {canManageArchive && (
+              <Button variant="outline" size="sm" onClick={onOpenArchive}>
+                <Archive /> Archive{archiveCount ? ` (${archiveCount})` : ''}
+              </Button>
+            )}
+            <HelpTip text="Full production uses all six stages. Design work moves from Idea to Production. Same-day work enters the amber ad hoc checkpoint before Upload." />
+          </div>
         }
       />
       <div className="-mx-4 overflow-x-auto px-4 pb-4 sm:-mx-7 sm:px-7 lg:-mx-10 lg:px-10">
@@ -3090,6 +3229,65 @@ function Pipeline({
         </div>
       </div>
     </>
+  );
+}
+
+function ArchiveSheet({
+  open,
+  onOpenChange,
+  items,
+  onOpen,
+}: {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  items: ContentItem[];
+  onOpen: (id: string) => void;
+}) {
+  return (
+    <Sheet open={open} onOpenChange={onOpenChange}>
+      <SheetContent className="w-full overflow-y-auto sm:max-w-lg">
+        <SheetHeader className="border-b px-5 py-5">
+          <SheetTitle className="flex items-center gap-2 font-display text-2xl">
+            <Archive className="size-5 text-[#b27708]" /> Archive
+          </SheetTitle>
+          <SheetDescription>
+            Archived content is kept here with its comments, feedback, RACI and
+            history. Open a card to restore it when needed.
+          </SheetDescription>
+        </SheetHeader>
+        <div className="space-y-3 px-5 py-5">
+          {items.map((item) => (
+            <button
+              key={item.id}
+              type="button"
+              onClick={() => onOpen(item.id)}
+              className="w-full rounded-xl border border-border bg-card p-4 text-left transition hover:border-[#dfa126] hover:bg-muted"
+            >
+              <div className="flex items-start justify-between gap-3">
+                <div className="min-w-0">
+                  <p className="font-semibold text-card-foreground">
+                    {item.title}
+                  </p>
+                  <p className="mt-1 text-xs text-muted-foreground">
+                    {item.contentType} · {item.platform} · {item.stage}
+                  </p>
+                </div>
+                <Badge variant="secondary" className="shrink-0">
+                  Archived
+                </Badge>
+              </div>
+              <p className="mt-3 text-xs text-muted-foreground">
+                {item.archivedAt
+                  ? `Archived ${new Date(item.archivedAt).toLocaleDateString('en-IN', { timeZone: 'Asia/Kolkata', day: 'numeric', month: 'short', year: 'numeric' })}`
+                  : 'Archived record'}
+                {item.archivedBy ? ` by ${item.archivedBy.name}` : ''}
+              </p>
+            </button>
+          ))}
+          {!items.length && <EmptyState text="No content has been archived." />}
+        </div>
+      </SheetContent>
+    </Sheet>
   );
 }
 
@@ -5403,6 +5601,7 @@ function ItemDetail({
   roles,
   person,
   busy,
+  canManageArchive,
   onOpenChange,
   onStepChange,
   onSubmit,
@@ -5410,12 +5609,15 @@ function ItemDetail({
   onRequestChanges,
   onComment,
   onResolveComment,
+  onArchive,
+  onRestore,
 }: {
   open: boolean;
   item?: ContentItem;
   roles: AppRole[];
   person: Person;
   busy: boolean;
+  canManageArchive: boolean;
   onOpenChange: (open: boolean) => void;
   onStepChange: (item: ContentItem, step: string) => void;
   onSubmit: (item: ContentItem) => void;
@@ -5433,6 +5635,8 @@ function ItemDetail({
     commentId: string,
     resolved: boolean,
   ) => void;
+  onArchive: (item: ContentItem) => void;
+  onRestore: (item: ContentItem) => void;
 }) {
   const [comment, setComment] = useState('');
   const [commentKind, setCommentKind] = useState<Comment['kind']>('Update');
@@ -5440,7 +5644,9 @@ function ItemDetail({
   const [replyingTo, setReplyingTo] = useState<string>();
   const [changeNote, setChangeNote] = useState('');
   if (!item) return null;
-  const readOnly = roles.length === 1 && roles[0] === 'Read-only Stakeholder';
+  const archived = item.lifecycle === 'Archived';
+  const readOnly =
+    archived || (roles.length === 1 && roles[0] === 'Read-only Stakeholder');
   const canSubmit = canSubmitItem(item, roles, person);
   const canApprove = canApproveItem(item, roles, person);
   const approvalRequiresReview =
@@ -5815,10 +6021,15 @@ function ItemDetail({
           </Tabs>
         </div>
 
-        {!readOnly && (
+        {((!readOnly && item.lifecycle === 'Active') ||
+          (archived && canManageArchive)) && (
           <SheetFooter className="sticky bottom-0 border-t bg-card px-5 py-4">
             <div className="w-full space-y-2">
-              {item.status === 'Pending approval' && canApprove ? (
+              {archived && canManageArchive ? (
+                <Button disabled={busy} onClick={() => onRestore(item)}>
+                  <RotateCcw /> Restore to tracker
+                </Button>
+              ) : item.status === 'Pending approval' && canApprove ? (
                 <>
                   <Textarea
                     value={changeNote}
@@ -5851,6 +6062,15 @@ function ItemDetail({
                   <FileCheck2 /> Submit {item.stage} for approval
                 </Button>
               ) : null}
+              {!archived && canManageArchive && (
+                <Button
+                  variant="outline"
+                  disabled={busy}
+                  onClick={() => onArchive(item)}
+                >
+                  <Archive /> Archive card
+                </Button>
+              )}
             </div>
           </SheetFooter>
         )}

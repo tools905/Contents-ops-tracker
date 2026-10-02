@@ -31,11 +31,24 @@ Demo edits are held in memory and reset on reload. Live persistence, email deliv
 
 1. Create a Supabase project and keep public sign-ups disabled; users should be invited or created by an administrator.
 2. Link this local folder with the Supabase CLI and apply all migrations in `supabase/migrations` in timestamp order.
-3. Add `SUPABASE_URL` and `SUPABASE_PUBLISHABLE_KEY` to the Site runtime environment.
+3. Add `NEXT_PUBLIC_SUPABASE_URL` and `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY` (or `SUPABASE_URL` and `SUPABASE_PUBLISHABLE_KEY`) to the hosting environment, for example Vercel Project Settings → Environment Variables.
 4. Invite `aditi@buildablelabs.com` in Supabase Auth. Her profile is automatically activated as the single protected Owner account.
 5. Sign in as Aditi. The Owner can invite and activate teammates from **People & access**; Admin invitations remain pending until the Owner assigns access. Only Aditi can change existing roles. Content, stage-level discussion and interdepartment requests are protected with role-aware RLS.
 6. Deploy the `invite-user` and `send-notifications` Edge Functions. Add `RESEND_API_KEY` as an Edge Function secret. The default sender is `AAFM Content Ops <notifications@updates.buildablelabs.com>`; override it with `RESEND_FROM_EMAIL` only if needed. Schedule an authenticated invocation of `send-notifications` with Supabase Cron (for example, every 15 minutes). Keep all service credentials in Supabase, never in browser code.
 7. Configure Supabase Auth custom SMTP with the Resend SMTP credentials for the verified `updates.buildablelabs.com` domain. Disable public sign-ups so only Owner/Admin invitations can create logins.
+
+## Run locally and deploy on Vercel
+
+This is a standard Next.js (App Router) app.
+
+```bash
+npm install
+npm run dev     # local development
+npm run build   # production build
+npm run start   # serve the production build
+```
+
+To host on Vercel, import the repository, keep the detected **Next.js** framework preset and add the two Supabase environment variables above. After the first deployment, add the Vercel URL to Supabase Auth → URL Configuration (Site URL and Redirect URLs) so login and invitation links work. Never add a service-role key to Vercel.
 
 ## Stage discussion and feedback
 

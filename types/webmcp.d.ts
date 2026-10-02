@@ -4,7 +4,7 @@ interface ModelContextTool {
   description: string;
   inputSchema: Record<string, unknown>;
   annotations?: { readOnlyHint?: boolean; untrustedContentHint?: boolean };
-  execute(input: unknown): unknown | Promise<unknown>;
+  execute(input: unknown): unknown;
 }
 
 interface Document {

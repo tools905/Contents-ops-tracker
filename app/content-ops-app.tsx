@@ -1857,7 +1857,6 @@ export default function ContentOpsApp({
               demoMode={demoMode}
               busy={busy}
               canManageAccess={canManageAccess}
-              canAddTeammate={canManageAdmins}
               currentUserId={currentUser.id}
               isPrimaryAccessOwner={canManageAdmins}
               onInvite={() => setInviteTarget('new')}
@@ -1918,7 +1917,8 @@ export default function ContentOpsApp({
         onOpenChange={(open) => !open && setInviteTarget(undefined)}
         person={inviteTarget === 'new' ? undefined : inviteTarget}
         onInvite={inviteUser}
-        canAssignAccess={canManageAdmins}
+        canAssignAccess={canManageAccess}
+        canGrantAdmin={canManageAdmins}
       />
       <CalendarImportDialog
         rows={importRows}
@@ -4230,7 +4230,6 @@ function People({
   demoMode,
   busy,
   canManageAccess,
-  canAddTeammate,
   currentUserId,
   isPrimaryAccessOwner,
   onInvite,
@@ -4244,7 +4243,6 @@ function People({
   demoMode: boolean;
   busy: boolean;
   canManageAccess: boolean;
-  canAddTeammate: boolean;
   currentUserId: string;
   isPrimaryAccessOwner: boolean;
   onInvite: () => void;
@@ -4273,7 +4271,7 @@ function People({
           <div className="flex items-center gap-2">
             {demoMode && <Badge variant="outline">Demo data</Badge>}
             <HelpTip text="Admins can approve, reject, restore and revoke access and assign responsibilities for non-Admin teammates. Only Aditi can grant or change the Admin role and Owner access." />
-            {canAddTeammate ? (
+            {canManageAccess ? (
               <Button onClick={onInvite}>
                 <Plus /> Add or invite teammate
               </Button>
@@ -6040,14 +6038,19 @@ function InviteUserDialog({
   onOpenChange,
   person,
   onInvite,
-  canAssignAccess,
+  canAssignAccess: canAssign,
+  canGrantAdmin,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   person?: Person;
   onInvite: (draft: InviteDraft) => void;
   canAssignAccess: boolean;
+  canGrantAdmin: boolean;
 }) {
+  // A saved Admin profile keeps its roles; Aditi approves it once.
+  const canAssignAccess =
+    canAssign && (canGrantAdmin || !person?.roles.includes('Admin'));
   const [fullName, setFullName] = useState(person?.name ?? '');
   const [email, setEmail] = useState(person?.email ?? '');
   const [roles, setRoles] = useState<Exclude<AppRole, 'Owner'>[]>([
@@ -6056,7 +6059,7 @@ function InviteUserDialog({
     ) ?? ['Content Producer']),
   ]);
   const assignable: Exclude<AppRole, 'Owner'>[] = [
-    'Admin',
+    ...(canGrantAdmin ? (['Admin'] as const) : []),
     'Content Producer',
     'Content Approver',
     'Monitoring',

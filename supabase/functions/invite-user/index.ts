@@ -87,16 +87,12 @@ Deno.serve(async (request) => {
     return reply({ error: 'Enter the person’s name' }, 400);
   if (roles.some((role) => !allowedRoles.has(role)))
     return reply({ error: 'Choose only valid responsibilities' }, 400);
+  if (!owner && roles.includes('admin'))
+    return reply({ error: 'Only Aditi can grant the Admin role' }, 403);
   if (owner && !roles.length)
     return reply({ error: 'Choose at least one responsibility' }, 400);
-  if (!owner && !payload.profileId)
-    return reply(
-      {
-        error:
-          'Admins invite from an existing team profile so its saved responsibilities stay unchanged',
-      },
-      400,
-    );
+  if (!owner && !payload.profileId && !roles.length)
+    return reply({ error: 'Choose at least one responsibility' }, 400);
 
   let targetProfileId = payload.profileId;
   let fixedRoles: string[] = [];
@@ -115,11 +111,13 @@ Deno.serve(async (request) => {
     fixedRoles = (targetRoles ?? []).map(
       (entry: { role: string }) => entry.role,
     );
-    if (!owner && !fixedRoles.length)
-      return reply(
-        { error: 'Aditi must assign this person a responsibility first' },
-        403,
-      );
+    if (
+      !owner &&
+      !fixedRoles.includes('admin') &&
+      !fixedRoles.length &&
+      !roles.length
+    )
+      return reply({ error: 'Choose at least one responsibility' }, 400);
     const { error: prepareError } = await admin
       .from('profiles')
       .update({ email, full_name: fullName })
@@ -158,11 +156,22 @@ Deno.serve(async (request) => {
       500,
     );
 
-  if (owner) {
+  // Owners set any roles. Admins set non-Admin roles; a saved Admin profile
+  // keeps its roles and waits for Aditi's approval.
+  const rolesToWrite = owner
+    ? roles
+    : fixedRoles.includes('admin')
+      ? undefined
+      : roles.length
+        ? roles
+        : fixedRoles;
+  if (rolesToWrite) {
     await admin.from('user_roles').delete().eq('profile_id', targetProfileId);
     const { error: rolesError } = await admin
       .from('user_roles')
-      .insert(roles.map((role) => ({ profile_id: targetProfileId!, role })));
+      .insert(
+        rolesToWrite.map((role) => ({ profile_id: targetProfileId!, role })),
+      );
     if (rolesError)
       return reply({ error: 'Invitation created, but role setup failed' }, 500);
   }

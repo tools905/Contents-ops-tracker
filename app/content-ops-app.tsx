@@ -4254,6 +4254,9 @@ function People({
   const pendingPeople = people.filter(
     (person) => person.hasLogin && person.accessStatus === 'pending',
   );
+  const rejectedPeople = people.filter(
+    (person) => person.hasLogin && person.accessStatus === 'rejected',
+  );
   return (
     <>
       <PageTitle
@@ -4332,6 +4335,71 @@ function People({
                       onClick={() => onApprove(person)}
                     >
                       Approve
+                    </Button>
+                  </div>
+                </div>
+              );
+            })}
+          </CardContent>
+        </Card>
+      )}
+      {canManageAccess && rejectedPeople.length > 0 && (
+        <Card className="mb-5 bg-card">
+          <CardHeader>
+            <CardTitle>Rejected requests</CardTitle>
+            <CardDescription>
+              Rejected by mistake? Restore access to put the person back on the
+              team. They need at least one responsibility, and Admin access
+              always requires Aditi.
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            {rejectedPeople.map((person) => {
+              const needsOwner = person.roles.includes('Admin');
+              const hasRole = person.roles.length > 0;
+              const canRestore =
+                hasRole && (!needsOwner || isPrimaryAccessOwner);
+              return (
+                <div
+                  key={person.id}
+                  className="flex flex-col gap-3 rounded-xl border border-border p-4 sm:flex-row sm:items-center"
+                >
+                  <Avatar person={person} />
+                  <div className="min-w-0 flex-1">
+                    <p className="font-semibold text-card-foreground">
+                      {person.name}
+                    </p>
+                    <p className="truncate text-sm text-muted-foreground">
+                      {person.email}
+                    </p>
+                    <div className="mt-2 flex flex-wrap gap-1.5">
+                      {person.roles.map((role) => (
+                        <Badge key={role} variant="outline">
+                          {role}
+                        </Badge>
+                      ))}
+                      {!hasRole && (
+                        <Badge variant="outline">
+                          Open the person to assign a responsibility
+                        </Badge>
+                      )}
+                      {needsOwner && !isPrimaryAccessOwner && (
+                        <Badge variant="outline">Aditi approval required</Badge>
+                      )}
+                    </div>
+                  </div>
+                  <div className="flex gap-2">
+                    <Button
+                      variant="outline"
+                      onClick={() => setSelectedPersonId(person.id)}
+                    >
+                      Open
+                    </Button>
+                    <Button
+                      disabled={busy || !canRestore}
+                      onClick={() => onApprove(person)}
+                    >
+                      Restore access
                     </Button>
                   </div>
                 </div>
@@ -4439,8 +4507,10 @@ function People({
                 person={selectedPerson}
                 busy={busy}
                 canManage={canManageAccess}
+                isPrimaryAccessOwner={isPrimaryAccessOwner}
                 onInvite={() => onInvitePerson(selectedPerson)}
                 onManage={onManage}
+                onApprove={onApprove}
                 onToggleAkhilOwner={onToggleAkhilOwner}
               />
             </div>
@@ -4455,15 +4525,19 @@ function AccessCard({
   person,
   busy,
   canManage,
+  isPrimaryAccessOwner,
   onInvite,
   onManage,
+  onApprove,
   onToggleAkhilOwner,
 }: {
   person: Person;
   busy: boolean;
   canManage: boolean;
+  isPrimaryAccessOwner: boolean;
   onInvite: () => void;
   onManage: (person: Person, active: boolean, roles: AppRole[]) => void;
+  onApprove: (person: Person) => void;
   onToggleAkhilOwner: (person: Person, enabled: boolean) => void;
 }) {
   const isOwner = person.roles.includes('Owner');
@@ -4537,6 +4611,39 @@ function AccessCard({
           </p>
         ) : canManage ? (
           <>
+            {person.hasLogin &&
+              (person.accessStatus === 'rejected' ||
+                person.accessStatus === 'pending') && (
+                <div className="mb-3 rounded-xl border border-[#dfa126]/45 bg-[var(--warning-subtle)] p-3">
+                  <p className="text-sm font-semibold text-[var(--warning-foreground)]">
+                    {person.accessStatus === 'rejected'
+                      ? 'Access was rejected'
+                      : 'Awaiting approval'}
+                  </p>
+                  <p className="mt-0.5 text-xs text-muted-foreground">
+                    {person.roles.includes('Admin') && !isPrimaryAccessOwner
+                      ? 'Admin access can only be approved by Aditi.'
+                      : person.roles.length === 0
+                        ? 'Assign a responsibility below and save, then approve.'
+                        : person.accessStatus === 'rejected'
+                          ? 'Restore access to let this person sign in again.'
+                          : 'Approve to let this person sign in.'}
+                  </p>
+                  <Button
+                    className="mt-2 w-full"
+                    disabled={
+                      busy ||
+                      person.roles.length === 0 ||
+                      (person.roles.includes('Admin') && !isPrimaryAccessOwner)
+                    }
+                    onClick={() => onApprove(person)}
+                  >
+                    {person.accessStatus === 'rejected'
+                      ? 'Restore access'
+                      : 'Approve access'}
+                  </Button>
+                </div>
+              )}
             <div className="mb-3 flex items-center justify-between rounded-xl border border-border p-3 text-sm font-medium">
               <span>{person.hasLogin ? 'App access' : 'Invite required'}</span>
               <Checkbox

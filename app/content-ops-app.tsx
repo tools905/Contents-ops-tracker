@@ -415,7 +415,7 @@ export default function ContentOpsApp({
   const canManageAdmins =
     isPrimaryAccessOwner && effectiveRoles.includes('Owner');
   const canManageAccess = hasAnyRole(effectiveRoles, ['Owner', 'Admin']);
-  const canManageRaci = effectiveRoles.includes('Owner');
+  const canManageRaci = hasAnyRole(effectiveRoles, ['Owner', 'Admin']);
   const canInvitePeople = hasAnyRole(effectiveRoles, ['Owner', 'Admin']);
   const canCreate = hasAnyRole(effectiveRoles, [
     'Owner',
@@ -757,8 +757,10 @@ export default function ContentOpsApp({
           : [...all, person],
       );
       setInviteTarget(undefined);
-      return showNotice(`Demo invitation prepared for ${draft.email}.`);
+      showNotice(`Demo invitation prepared for ${draft.email}.`);
+      return undefined;
     }
+    let failure: string | undefined;
     const saved = await mutateLive(async (supabase) => {
       const { error } = await supabase.functions.invoke('invite-user', {
         body: {
@@ -768,9 +770,13 @@ export default function ContentOpsApp({
           roles: draft.roles.map((role) => roleToDb[role]),
         },
       });
-      if (error) throw error;
+      if (error) {
+        failure = await edgeFunctionError(error);
+        throw new Error(failure);
+      }
     }, `Invitation sent to ${draft.email}.`);
     if (saved) setInviteTarget(undefined);
+    return saved ? undefined : (failure ?? 'The invitation could not be sent.');
   };
 
   const requestChanges = async (item: ContentItem, note: string) => {
@@ -1795,7 +1801,7 @@ export default function ContentOpsApp({
           </div>
         </header>
         {notice && (
-          <output className="fixed right-4 top-20 z-50 max-w-sm rounded-xl bg-[#1f2342] px-4 py-3 text-sm text-white shadow-xl">
+          <output className="fixed right-4 top-20 z-[100] max-w-sm rounded-xl bg-[#1f2342] px-4 py-3 text-sm text-white shadow-xl">
             {notice}
           </output>
         )}
@@ -1917,6 +1923,7 @@ export default function ContentOpsApp({
         onOpenChange={(open) => !open && setInviteTarget(undefined)}
         person={inviteTarget === 'new' ? undefined : inviteTarget}
         onInvite={inviteUser}
+        busy={busy}
         canAssignAccess={canManageAccess}
         canGrantAdmin={canManageAdmins}
       />
@@ -2010,6 +2017,19 @@ export default function ContentOpsApp({
   );
 }
 
+// supabase.functions.invoke hides the function's JSON error behind a
+// generic "non-2xx status code" message; read the real one.
+async function edgeFunctionError(error: unknown) {
+  const response = (error as { context?: unknown }).context;
+  if (response instanceof Response) {
+    const body = await response
+      .clone()
+      .json()
+      .catch(() => undefined);
+    if (typeof body?.error === 'string') return body.error as string;
+  }
+  return error instanceof Error ? error.message : 'Something went wrong';
+}
 function hasAnyRole(roles: AppRole[], expected: AppRole[]) {
   return expected.some((role) => roles.includes(role));
 }
@@ -4698,15 +4718,15 @@ function AccessCard({
             >
               {person.hasLogin ? 'Save access' : 'Save after invitation'}
             </Button>
-            {!person.hasLogin && (
-              <Button
-                variant="outline"
-                className="mt-2 w-full"
-                onClick={onInvite}
-              >
-                <Send /> Add email & invite
-              </Button>
-            )}
+            <Button
+              variant="outline"
+              className="mt-2 w-full"
+              disabled={busy}
+              onClick={onInvite}
+            >
+              <Send />{' '}
+              {person.hasLogin ? 'Resend invitation' : 'Add email & invite'}
+            </Button>
           </>
         ) : (
           <div className="space-y-3">
@@ -4819,8 +4839,8 @@ function Settings({
                 <HelpTip text="These are the agreed default owners for each stage. Changes update active work and become the starting point for future content." />
               </div>
               <CardDescription className="mt-1">
-                The team brief, kept as a workspace setting. Only the protected
-                Owner can change these defaults.
+                The team brief, kept as a workspace setting. Owners and Admins
+                can change these defaults.
               </CardDescription>
             </div>
           </CardHeader>
@@ -6038,13 +6058,15 @@ function InviteUserDialog({
   onOpenChange,
   person,
   onInvite,
+  busy,
   canAssignAccess: canAssign,
   canGrantAdmin,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   person?: Person;
-  onInvite: (draft: InviteDraft) => void;
+  onInvite: (draft: InviteDraft) => Promise<string | undefined>;
+  busy: boolean;
   canAssignAccess: boolean;
   canGrantAdmin: boolean;
 }) {
@@ -6053,6 +6075,8 @@ function InviteUserDialog({
     canAssign && (canGrantAdmin || !person?.roles.includes('Admin'));
   const [fullName, setFullName] = useState(person?.name ?? '');
   const [email, setEmail] = useState(person?.email ?? '');
+  const [error, setError] = useState('');
+  const resend = Boolean(person?.hasLogin);
   const [roles, setRoles] = useState<Exclude<AppRole, 'Owner'>[]>([
     ...(person?.roles.filter(
       (role): role is Exclude<AppRole, 'Owner'> => role !== 'Owner',
@@ -6069,7 +6093,9 @@ function InviteUserDialog({
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="sm:max-w-lg">
         <DialogHeader>
-          <DialogTitle>Invite a teammate</DialogTitle>
+          <DialogTitle>
+            {resend ? 'Resend invitation' : 'Invite a teammate'}
+          </DialogTitle>
           <DialogDescription>
             They receive a secure email invitation and must sign in before
             accessing the tracker.
@@ -6077,15 +6103,17 @@ function InviteUserDialog({
         </DialogHeader>
         <form
           className="space-y-4"
-          onSubmit={(event) => {
+          onSubmit={async (event) => {
             event.preventDefault();
-            if (canAssignAccess && !roles.length) return;
-            onInvite({
+            if (busy || (canAssignAccess && !roles.length)) return;
+            setError('');
+            const failure = await onInvite({
               profileId: person?.id,
               email: email.trim().toLowerCase(),
               fullName: fullName.trim(),
               roles: canAssignAccess ? roles : [],
             });
+            if (failure) setError(failure);
           }}
         >
           <div>
@@ -6104,6 +6132,7 @@ function InviteUserDialog({
               required
               type="email"
               value={email}
+              readOnly={resend}
               onChange={(event) => setEmail(event.target.value)}
               placeholder="name@aafmindia.com"
             />
@@ -6147,6 +6176,12 @@ function InviteUserDialog({
             Invitations will be sent from the verified updates.buildablelabs.com
             email domain after Resend is connected.
           </p>
+          {error && (
+            <Alert variant="destructive" role="alert">
+              <AlertTitle>Invitation not sent</AlertTitle>
+              <AlertDescription>{error}</AlertDescription>
+            </Alert>
+          )}
           <DialogFooter>
             <Button
               type="button"
@@ -6158,12 +6193,18 @@ function InviteUserDialog({
             <Button
               type="submit"
               disabled={
+                busy ||
                 !fullName.trim() ||
                 !email.trim() ||
                 (canAssignAccess && !roles.length)
               }
             >
-              <Send /> Send invitation
+              <Send />{' '}
+              {busy
+                ? 'Sending…'
+                : resend
+                  ? 'Resend invitation'
+                  : 'Send invitation'}
             </Button>
           </DialogFooter>
         </form>

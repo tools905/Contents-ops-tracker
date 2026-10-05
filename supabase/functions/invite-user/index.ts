@@ -51,12 +51,16 @@ Deno.serve(async (request) => {
   )
     return reply({ error: 'Active profile not found' }, 403);
 
-  const [{ data: owner }, { data: adminRole }] = await Promise.all([
-    admin
+  const isOwnerProfile = async (profileId: string) => {
+    const { data } = await admin
       .from('workspace_owners')
       .select('profile_id')
-      .eq('profile_id', callerProfile.id)
-      .maybeSingle(),
+      .eq('profile_id', profileId)
+      .maybeSingle();
+    return Boolean(data);
+  };
+  const [owner, { data: adminRole }] = await Promise.all([
+    isOwnerProfile(callerProfile.id),
     admin
       .from('user_roles')
       .select('profile_id')
@@ -89,41 +93,56 @@ Deno.serve(async (request) => {
     return reply({ error: 'Choose only valid responsibilities' }, 400);
   if (!owner && roles.includes('admin'))
     return reply({ error: 'Only Aditi can grant the Admin role' }, 403);
-  if (owner && !roles.length)
-    return reply({ error: 'Choose at least one responsibility' }, 400);
-  if (!owner && !payload.profileId && !roles.length)
+  if (!roles.length && (owner || !payload.profileId))
     return reply({ error: 'Choose at least one responsibility' }, 400);
 
+  const loadRoles = async (profileId: string) => {
+    const { data } = await admin
+      .from('user_roles')
+      .select('role')
+      .eq('profile_id', profileId);
+    return (data ?? []).map((entry: { role: string }) => entry.role);
+  };
+
   let targetProfileId = payload.profileId;
-  let fixedRoles: string[] = [];
+  let existingAuthUserId: string | null = null;
   if (targetProfileId) {
-    const [{ data: target }, { data: targetRoles }] = await Promise.all([
-      admin
-        .from('profiles')
-        .select('id,auth_user_id')
-        .eq('id', targetProfileId)
-        .maybeSingle(),
-      admin.from('user_roles').select('role').eq('profile_id', targetProfileId),
-    ]);
-    if (!target) return reply({ error: 'Team member not found' }, 404);
-    if (target.auth_user_id)
-      return reply({ error: 'This person already has a login' }, 409);
-    fixedRoles = (targetRoles ?? []).map(
-      (entry: { role: string }) => entry.role,
-    );
-    if (
-      !owner &&
-      !fixedRoles.includes('admin') &&
-      !fixedRoles.length &&
-      !roles.length
-    )
-      return reply({ error: 'Choose at least one responsibility' }, 400);
-    const { error: prepareError } = await admin
+    const { data: target } = await admin
       .from('profiles')
-      .update({ email, full_name: fullName })
-      .eq('id', targetProfileId);
-    if (prepareError)
-      return reply({ error: 'Could not prepare the team profile' }, 500);
+      .select('id,auth_user_id,email')
+      .eq('id', targetProfileId)
+      .maybeSingle();
+    if (!target) return reply({ error: 'Team member not found' }, 404);
+    if (await isOwnerProfile(target.id))
+      return reply({ error: 'Owner access cannot be changed here' }, 403);
+    if (target.auth_user_id) {
+      // Already invited: resend only while they have never signed in.
+      const { data: existing } = await admin.auth.admin.getUserById(
+        target.auth_user_id,
+      );
+      if (existing.user?.last_sign_in_at || existing.user?.email_confirmed_at)
+        return reply(
+          {
+            error: `${fullName} has already signed in. They can use “Forgot password” on the login page.`,
+          },
+          409,
+        );
+      if ((existing.user?.email ?? target.email)?.toLowerCase() !== email)
+        return reply(
+          {
+            error: `The invitation was sent to ${existing.user?.email ?? target.email}. Resend it to that address.`,
+          },
+          409,
+        );
+      existingAuthUserId = target.auth_user_id;
+    } else {
+      const { error: prepareError } = await admin
+        .from('profiles')
+        .update({ email, full_name: fullName })
+        .eq('id', targetProfileId);
+      if (prepareError)
+        return reply({ error: 'Could not prepare the team profile' }, 500);
+    }
   }
 
   const origin = request.headers.get('origin');
@@ -131,6 +150,7 @@ Deno.serve(async (request) => {
     origin && /^https?:\/\//.test(origin)
       ? `${origin}/login?auth_action=invite`
       : undefined;
+  // Supabase resends the invitation when the login exists but is unconfirmed.
   const { data: invited, error: inviteError } =
     await admin.auth.admin.inviteUserByEmail(email, {
       data: { full_name: fullName },
@@ -138,17 +158,21 @@ Deno.serve(async (request) => {
     });
   if (inviteError || !invited.user)
     return reply(
-      { error: inviteError?.message ?? 'Invitation could not be created' },
+      {
+        error: /already been registered/i.test(inviteError?.message ?? '')
+          ? `${email} already has a login. They can use “Forgot password” on the login page.`
+          : (inviteError?.message ?? 'Invitation could not be created'),
+      },
       400,
     );
 
-  if (!targetProfileId) {
+  if (!targetProfileId || !existingAuthUserId) {
     const { data: linkedProfile } = await admin
       .from('profiles')
       .select('id')
       .eq('auth_user_id', invited.user.id)
       .maybeSingle();
-    targetProfileId = linkedProfile?.id;
+    targetProfileId = linkedProfile?.id ?? targetProfileId;
   }
   if (!targetProfileId)
     return reply(
@@ -156,6 +180,8 @@ Deno.serve(async (request) => {
       500,
     );
 
+  // Read roles after linking: a new invite can match a saved directory entry.
+  const fixedRoles = await loadRoles(targetProfileId);
   // Owners set any roles. Admins set non-Admin roles; a saved Admin profile
   // keeps its roles and waits for Aditi's approval.
   const rolesToWrite = owner
@@ -165,6 +191,11 @@ Deno.serve(async (request) => {
       : roles.length
         ? roles
         : fixedRoles;
+  if (!rolesToWrite?.length && !fixedRoles.length)
+    return reply(
+      { error: 'Invitation sent, but choose at least one responsibility' },
+      400,
+    );
   if (rolesToWrite) {
     await admin.from('user_roles').delete().eq('profile_id', targetProfileId);
     const { error: rolesError } = await admin

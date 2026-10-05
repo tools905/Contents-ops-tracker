@@ -412,8 +412,9 @@ export default function ContentOpsApp({
     () => getMyActions(visibleItems, effectiveRoles, rolePerson),
     [visibleItems, effectiveRoles, rolePerson],
   );
-  const canManageAccess =
+  const canManageAdmins =
     isPrimaryAccessOwner && effectiveRoles.includes('Owner');
+  const canManageAccess = hasAnyRole(effectiveRoles, ['Owner', 'Admin']);
   const canManageRaci = effectiveRoles.includes('Owner');
   const canInvitePeople = hasAnyRole(effectiveRoles, ['Owner', 'Admin']);
   const canCreate = hasAnyRole(effectiveRoles, [
@@ -1856,7 +1857,9 @@ export default function ContentOpsApp({
               demoMode={demoMode}
               busy={busy}
               canManageAccess={canManageAccess}
-              isPrimaryAccessOwner={isPrimaryAccessOwner}
+              canAddTeammate={canManageAdmins}
+              currentUserId={currentUser.id}
+              isPrimaryAccessOwner={canManageAdmins}
               onInvite={() => setInviteTarget('new')}
               onInvitePerson={(person) => setInviteTarget(person)}
               onManage={manageAccess}
@@ -1915,7 +1918,7 @@ export default function ContentOpsApp({
         onOpenChange={(open) => !open && setInviteTarget(undefined)}
         person={inviteTarget === 'new' ? undefined : inviteTarget}
         onInvite={inviteUser}
-        canAssignAccess={canManageAccess}
+        canAssignAccess={canManageAdmins}
       />
       <CalendarImportDialog
         rows={importRows}
@@ -4227,6 +4230,8 @@ function People({
   demoMode,
   busy,
   canManageAccess,
+  canAddTeammate,
+  currentUserId,
   isPrimaryAccessOwner,
   onInvite,
   onInvitePerson,
@@ -4239,6 +4244,8 @@ function People({
   demoMode: boolean;
   busy: boolean;
   canManageAccess: boolean;
+  canAddTeammate: boolean;
+  currentUserId: string;
   isPrimaryAccessOwner: boolean;
   onInvite: () => void;
   onInvitePerson: (person: Person) => void;
@@ -4265,8 +4272,8 @@ function People({
         action={
           <div className="flex items-center gap-2">
             {demoMode && <Badge variant="outline">Demo data</Badge>}
-            <HelpTip text="Aditi controls roles, Admin approval and optional Owner access for Akhil. Admins can invite and approve preconfigured non-Admin teammates." />
-            {canManageAccess ? (
+            <HelpTip text="Admins can approve, reject, restore and revoke access and assign responsibilities for non-Admin teammates. Only Aditi can grant or change the Admin role and Owner access." />
+            {canAddTeammate ? (
               <Button onClick={onInvite}>
                 <Plus /> Add or invite teammate
               </Button>
@@ -4507,6 +4514,7 @@ function People({
                 person={selectedPerson}
                 busy={busy}
                 canManage={canManageAccess}
+                isSelf={selectedPerson.id === currentUserId}
                 isPrimaryAccessOwner={isPrimaryAccessOwner}
                 onInvite={() => onInvitePerson(selectedPerson)}
                 onManage={onManage}
@@ -4524,7 +4532,8 @@ function People({
 function AccessCard({
   person,
   busy,
-  canManage,
+  canManage: canManageAccess,
+  isSelf,
   isPrimaryAccessOwner,
   onInvite,
   onManage,
@@ -4534,6 +4543,7 @@ function AccessCard({
   person: Person;
   busy: boolean;
   canManage: boolean;
+  isSelf: boolean;
   isPrimaryAccessOwner: boolean;
   onInvite: () => void;
   onManage: (person: Person, active: boolean, roles: AppRole[]) => void;
@@ -4542,12 +4552,16 @@ function AccessCard({
 }) {
   const isOwner = person.roles.includes('Owner');
   const isAkhil = person.email.toLowerCase() === 'akhil@buildablelabs.com';
+  // Admins manage everyone except Admins and themselves; only Aditi can.
+  const lockedToAditi =
+    !isPrimaryAccessOwner && (isSelf || person.roles.includes('Admin'));
+  const canManage = canManageAccess && !lockedToAditi;
   const [active, setActive] = useState(person.isActive !== false);
   const [roles, setRoles] = useState<AppRole[]>(
     person.roles.filter((role) => role !== 'Owner'),
   );
   const assignable: Exclude<AppRole, 'Owner'>[] = [
-    'Admin',
+    ...(isPrimaryAccessOwner ? (['Admin'] as const) : []),
     'Content Producer',
     'Content Approver',
     'Monitoring',
@@ -4581,7 +4595,7 @@ function AccessCard({
         )}
       </CardHeader>
       <CardContent>
-        {canManage && isAkhil && (
+        {canManage && isPrimaryAccessOwner && isAkhil && (
           <div className="mb-4 flex items-center justify-between rounded-xl border border-[#dfa126]/45 bg-[var(--warning-subtle)] p-3">
             <div>
               <p className="text-sm font-semibold text-[var(--warning-foreground)]">
@@ -4645,7 +4659,11 @@ function AccessCard({
                 </div>
               )}
             <div className="mb-3 flex items-center justify-between rounded-xl border border-border p-3 text-sm font-medium">
-              <span>{person.hasLogin ? 'App access' : 'Invite required'}</span>
+              <span>
+                {person.hasLogin
+                  ? 'App access (untick to revoke)'
+                  : 'Invite required'}
+              </span>
               <Checkbox
                 aria-label="Toggle app access"
                 checked={active}
@@ -4710,7 +4728,9 @@ function AccessCard({
               ))}
             </div>
             <p className="text-sm text-muted-foreground">
-              Owners manage existing access. Admins can invite new teammates.
+              {canManageAccess && lockedToAditi
+                ? 'Only Aditi can change an Admin’s access or her own.'
+                : 'Admins and Owners manage existing access.'}
             </p>
             {!person.hasLogin && (
               <Button variant="outline" className="w-full" onClick={onInvite}>
